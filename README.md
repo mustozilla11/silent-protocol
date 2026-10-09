@@ -1,6 +1,21 @@
-# 🛡️ Sessiz Protokol (Silent Protocol) - v0.1.0
+# 🛡️ Sessiz Protokol (Silent Protocol) - v0.2.0
 
-> Sesli veya yazılı sohbet içermeyen; tamamen **"işaretler, iddialar ve veri logları"** üzerinden oynanan sessiz bir sosyal çıkarım (social deduction) oyunu.
+> Sesli veya yazılı sohbet içermeyen; tamamen **"işaretler, iddialar ve veri logları"** üzerinden oynanan sessiz bir masabaşı sosyal çıkarım (social deduction) oyunu.
+
+---
+
+## 📌 v0.2.0 Yenilikleri
+- **Masabaşı Düzeni (Oval Poker/Board Game Table)**:
+  - 5 oyuncunun masanın etrafında sandalyelere oturduğu gerçek bir kutu oyunu hissi.
+  - Özel çizilmiş vektörel noir karakter portreleri (Ajan Kaya, Diplomat Ece, Analist Can, Taktisyen Deniz, Komutan).
+- **10-12 Saniyelik Karar ve Gerilim Süresi (Round Timer)**:
+  - Botlar artık oldu-bittiye getirmeden 2-6 saniye düşünerek hareket eder.
+  - Masanın üzerinde canlı geri sayım sayacı.
+- **Siyah ve Beyaz Tema Desteği**:
+  - Koyu Noir Ahşap & Keçe Masası (Varsayılan).
+  - Klasik Açık/Beyaz Arşiv Kağıdı Teması (Tek tıkla geçiş).
+- **Yapay Zeka Renkleri Temizlendi**:
+  - Neon siber maviler yerine antika pirinç/altın, derin bordo, lacivert ve daktilo mürekkebi tonları.
 
 ---
 

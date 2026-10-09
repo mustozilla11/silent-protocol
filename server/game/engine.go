@@ -7,7 +7,7 @@ import (
 	"time"
 )
 
-const AppVersion = "v0.1.0"
+const AppVersion = "v0.2.0"
 
 type Room struct {
 	mu           sync.RWMutex
@@ -817,7 +817,7 @@ func (r *Room) GetPrivateView(playerID string) PrivatePlayerView {
 // --- BOT YAPAY ZEKASI (RULES-BASED BOT SIMULATION) ---
 func (r *Room) checkBotAction() {
 	go func() {
-		time.Sleep(700 * time.Millisecond) // İnsansı küçük gecikme
+		time.Sleep(1200 * time.Millisecond) // İlk gözlem payı
 
 		r.mu.RLock()
 		phase := r.Phase
@@ -829,7 +829,8 @@ func (r *Room) checkBotAction() {
 		switch phase {
 		case PhaseNomination:
 			if leader != nil && leader.IsBot && leader.IsAlive {
-				// Uygun bir aday bul
+				// Lider bot 2.5 saniye düşünsün
+				time.Sleep(2500 * time.Millisecond)
 				r.mu.RLock()
 				candidates := make([]string, 0)
 				for _, p := range r.Players {
@@ -853,15 +854,15 @@ func (r *Room) checkBotAction() {
 						botID := p.ID
 						botRole := p.Role
 						go func(bID string, bRole Role) {
-							time.Sleep(time.Duration(400+rand.Intn(600)) * time.Millisecond)
+							// Her bot masada farklı zamanda düşünsün (2 ila 6 saniye)
+							delay := time.Duration(1800+rand.Intn(4200)) * time.Millisecond
+							time.Sleep(delay)
 							vote := "YES"
 							if bRole == RoleProtector {
-								// Koruyucu bot: Kaos yüksekse veya güvensiz hissetmediyse genelde YES verir
-								if rand.Float32() < 0.25 {
+								if rand.Float32() < 0.30 {
 									vote = "NO"
 								}
 							} else {
-								// Casus bot
 								vote = "YES"
 							}
 							_ = r.CastVote(bID, vote)
@@ -873,6 +874,8 @@ func (r *Room) checkBotAction() {
 
 		case PhaseLegislateLeader:
 			if leader != nil && leader.IsBot {
+				// Lider bot kartları 3 saniye incelesin
+				time.Sleep(3000 * time.Millisecond)
 				r.mu.RLock()
 				cards := r.LeaderCards
 				role := leader.Role
@@ -880,7 +883,6 @@ func (r *Room) checkBotAction() {
 
 				discardIdx := 0
 				if role == RoleProtector {
-					// Koruyucu kırmızı varsa kırmızıyı eler
 					for i, c := range cards {
 						if c == PolicyRed {
 							discardIdx = i
@@ -888,7 +890,6 @@ func (r *Room) checkBotAction() {
 						}
 					}
 				} else {
-					// Casus mavi varsa maviyi eler
 					for i, c := range cards {
 						if c == PolicyBlue {
 							discardIdx = i
@@ -901,6 +902,8 @@ func (r *Room) checkBotAction() {
 
 		case PhaseLegislatePartner:
 			if partner != nil && partner.IsBot {
+				// Ortak bot 3.5 saniye düşünsün
+				time.Sleep(3500 * time.Millisecond)
 				r.mu.RLock()
 				cards := r.PartnerCards
 				role := partner.Role
@@ -908,7 +911,6 @@ func (r *Room) checkBotAction() {
 
 				enactIdx := 0
 				if role == RoleProtector {
-					// Koruyucu mavi varsa maviyi yasalaştırır
 					for i, c := range cards {
 						if c == PolicyBlue {
 							enactIdx = i
@@ -916,7 +918,6 @@ func (r *Room) checkBotAction() {
 						}
 					}
 				} else {
-					// Casus kırmızı varsa kırmızıyı yasalaştırır
 					for i, c := range cards {
 						if c == PolicyRed {
 							enactIdx = i
@@ -928,6 +929,7 @@ func (r *Room) checkBotAction() {
 			}
 
 		case PhaseClaiming:
+			time.Sleep(2000 * time.Millisecond)
 			r.mu.RLock()
 			claim := r.CurrentClaim
 			r.mu.RUnlock()
@@ -958,6 +960,7 @@ func (r *Room) checkBotAction() {
 
 			// Ortak botsa beyan ver
 			if partner != nil && partner.IsBot && !claim.PartnerClaimed {
+				time.Sleep(1500 * time.Millisecond)
 				r.mu.RLock()
 				pCards := r.PartnerCards
 				r.mu.RUnlock()
@@ -971,12 +974,13 @@ func (r *Room) checkBotAction() {
 
 		case PhasePowersPeek:
 			if leader != nil && leader.IsBot {
-				time.Sleep(1500 * time.Millisecond)
+				time.Sleep(3000 * time.Millisecond)
 				_ = r.ClosePeek(leader.ID)
 			}
 
 		case PhasePowersExecution:
 			if leader != nil && leader.IsBot {
+				time.Sleep(3500 * time.Millisecond)
 				r.mu.RLock()
 				targets := make([]string, 0)
 				for _, p := range r.Players {
@@ -993,8 +997,8 @@ func (r *Room) checkBotAction() {
 			}
 
 		case PhaseSuspicionMarking:
-			// Botlar rastgele şüphe çipi koysun ve 3 saniye sonra yeni tura geçilsin
-			time.Sleep(3 * time.Second)
+			// Oyuncunun çip koyması ve masayı incelemesi için 6 saniye bekle
+			time.Sleep(6 * time.Second)
 			r.FinishSuspicionMarking()
 		}
 	}()
