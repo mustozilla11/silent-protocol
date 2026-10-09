@@ -18,9 +18,9 @@ import {
   UserX,
   Briefcase
 } from 'lucide-react';
-import { CharacterAvatar } from './components/Characters';
+import { CharacterAvatar, ReactionBubble } from './components/Characters';
 
-const VERSION = "v0.2.0";
+const VERSION = "v0.3.0";
 const ROUND_TIME_LIMIT = 12; // 12 saniyelik gerilim süresi
 
 export default function App() {
@@ -138,6 +138,13 @@ export default function App() {
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify({ type, ...data }));
     }
+  };
+
+  const sendGesture = (expression, bubble, targetId = "") => {
+    sendAction("gesture", { expression, bubble, target_id: targetId });
+    setTimeout(() => {
+      sendAction("gesture", { expression: "neutral", bubble: "", target_id: "" });
+    }, 3500);
   };
 
   const isDark = theme === "dark";
@@ -372,43 +379,102 @@ export default function App() {
             </div>
 
             {/* MASANIN ALTINDA: SENİN KOLTUĞUN (KOMUTAN / OYUNCU) */}
-            <div className="mt-5 max-w-sm mx-auto">
-              <div className={`p-3 rounded-2xl border flex items-center justify-between shadow-lg transition-all ${
+            <div className="mt-5 max-w-md mx-auto">
+              <div className={`p-3 rounded-2xl border shadow-lg transition-all relative ${
                 isDark ? 'bg-[#181a22] border-amber-500/40' : 'bg-white border-zinc-300'
               }`}>
-                <div className="flex items-center gap-3">
-                  <CharacterAvatar id="player" className="w-14 h-14" />
-                  <div>
-                    <div className="flex items-center gap-2">
-                      <span className="font-bold text-sm">{you.name}</span>
-                      <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-amber-600/20 text-amber-500 border border-amber-600/30">
-                        SEN
+                {/* Tepki / Konuşma Baloncuğu */}
+                <ReactionBubble text={you.bubble} />
+
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-3">
+                    <div className="relative">
+                      <CharacterAvatar id="player" expression={you.expression || "neutral"} className="w-14 h-14" />
+                    </div>
+                    <div>
+                      <div className="flex items-center gap-2">
+                        <span className="font-bold text-sm">{you.name}</span>
+                        <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-amber-600/20 text-amber-500 border border-amber-600/30">
+                          SEN
+                        </span>
+                      </div>
+                      {/* Lider / Ortak Durumu */}
+                      <div className="flex gap-1 mt-1">
+                        {you.id === pub.leader_id && (
+                          <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-amber-500 text-black flex items-center gap-1">
+                            <Crown className="w-3 h-3" /> LİDER
+                          </span>
+                        )}
+                        {you.id === pub.partner_id && (
+                          <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-purple-600 text-white flex items-center gap-1">
+                            <Briefcase className="w-3 h-3" /> ORTAK
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Senin Oylama Durumun / Kartın */}
+                  <div className="text-right">
+                    {pub.phase === "VOTING" && (
+                      <span className="text-xs font-mono font-bold px-2 py-1 rounded bg-amber-950/80 text-amber-300 border border-amber-800 animate-pulse">
+                        Oy Bekleniyor
                       </span>
-                    </div>
-                    {/* Lider / Ortak Durumu */}
-                    <div className="flex gap-1 mt-1">
-                      {you.id === pub.leader_id && (
-                        <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-amber-500 text-black flex items-center gap-1">
-                          <Crown className="w-3 h-3" /> LİDER
-                        </span>
-                      )}
-                      {you.id === pub.partner_id && (
-                        <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-purple-600 text-white flex items-center gap-1">
-                          <Briefcase className="w-3 h-3" /> ORTAK
-                        </span>
-                      )}
-                    </div>
+                    )}
                   </div>
                 </div>
 
-                {/* Senin Oylama Durumun / Kartın */}
-                <div className="text-right">
-                  {pub.phase === "VOTING" && (
-                    <span className="text-xs font-mono font-bold px-2 py-1 rounded bg-amber-950/80 text-amber-300 border border-amber-800 animate-pulse">
-                      Oy Bekleniyor
-                    </span>
-                  )}
+                {/* SESSİZ MİMİK & REAKSİYON BUTONLARI (HA?!, AHA!, HMM..., İŞARET ET) */}
+                <div className="mt-3 pt-2.5 border-t border-zinc-700/40 flex items-center justify-between gap-1 overflow-x-auto text-[11px]">
+                  <span className="text-[10px] font-serif uppercase tracking-wider opacity-60 font-bold mr-1">
+                    Mimik:
+                  </span>
+                  <div className="flex items-center gap-1.5 flex-1 justify-end">
+                    <button
+                      onClick={() => sendGesture("thinking", "Hmm...")}
+                      title="Düşünceli bakış"
+                      className="px-2 py-1 rounded-lg border bg-zinc-900/60 hover:bg-zinc-800 border-zinc-700 text-amber-400 font-bold transition-all active:scale-95"
+                    >
+                      🧐 Hmm...
+                    </button>
+                    <button
+                      onClick={() => sendGesture("surprised", "Ha?!")}
+                      title="Şaşkın tepki"
+                      className="px-2 py-1 rounded-lg border bg-zinc-900/60 hover:bg-zinc-800 border-zinc-700 text-rose-400 font-bold transition-all active:scale-95"
+                    >
+                      😲 Ha?!
+                    </button>
+                    <button
+                      onClick={() => sendGesture("eureka", "Aha!")}
+                      title="Yakaladım / Aha!"
+                      className="px-2 py-1 rounded-lg border bg-zinc-900/60 hover:bg-zinc-800 border-zinc-700 text-yellow-300 font-bold transition-all active:scale-95"
+                    >
+                      💡 Aha!
+                    </button>
+                    <button
+                      onClick={() => sendGesture("look_left", "👈...")}
+                      title="Solundaki oyuncuyu süz"
+                      className="px-2 py-1 rounded-lg border bg-zinc-900/60 hover:bg-zinc-800 border-zinc-700 text-zinc-300 font-bold transition-all active:scale-95"
+                    >
+                      👈 Sol
+                    </button>
+                    <button
+                      onClick={() => sendGesture("look_right", "...👉")}
+                      title="Sağındaki oyuncuyu süz"
+                      className="px-2 py-1 rounded-lg border bg-zinc-900/60 hover:bg-zinc-800 border-zinc-700 text-zinc-300 font-bold transition-all active:scale-95"
+                    >
+                      👉 Sağ
+                    </button>
+                    <button
+                      onClick={() => sendGesture("pointing", "👉 Sen!")}
+                      title="İşaret et"
+                      className="px-2 py-1 rounded-lg border bg-zinc-900/60 hover:bg-zinc-800 border-zinc-700 text-red-400 font-bold transition-all active:scale-95"
+                    >
+                      🫵 İşaret
+                    </button>
+                  </div>
                 </div>
+
               </div>
             </div>
 
@@ -948,10 +1014,16 @@ function PlayerSeat({ player, pub, yourId, isDark, onToggleChip }) {
         ? 'bg-[#151720]/95 border-zinc-800 shadow-md' 
         : 'bg-white/95 border-zinc-300 shadow-sm'
     }`}>
-      
+      {/* Konuşma / Tepki Balonu */}
+      <ReactionBubble text={player.bubble} />
+
       {/* Özel Çizilmiş Karakter Portresi */}
       <div className="relative mb-1">
-        <CharacterAvatar id={player.id} className="w-12 h-12" />
+        <CharacterAvatar 
+          id={player.id} 
+          expression={player.expression || "neutral"} 
+          className="w-12 h-12" 
+        />
         
         {/* Lider Tacı veya Ortak Rozeti */}
         {isLeader && (

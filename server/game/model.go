@@ -31,12 +31,15 @@ const (
 )
 
 type Player struct {
-	ID        string `json:"id"`
-	Name      string `json:"name"`
-	IsBot     bool   `json:"is_bot"`
-	Role      Role   `json:"-"` // Asla istemciye topluca açılmaz!
-	IsAlive   bool   `json:"is_alive"`
-	Avatar    string `json:"avatar"`
+	ID         string `json:"id"`
+	Name       string `json:"name"`
+	IsBot      bool   `json:"is_bot"`
+	Role       Role   `json:"-"` // Asla istemciye topluca açılmaz!
+	IsAlive    bool   `json:"is_alive"`
+	Avatar     string `json:"avatar"`
+	Expression string `json:"expression"`
+	Bubble     string `json:"bubble"`
+	TargetID   string `json:"target_id"`
 }
 
 type Claim struct {
@@ -93,11 +96,14 @@ type PublicGameState struct {
 }
 
 type PlayerPublic struct {
-	ID      string `json:"id"`
-	Name    string `json:"name"`
-	IsBot   bool   `json:"is_bot"`
-	IsAlive bool   `json:"is_alive"`
-	Avatar  string `json:"avatar"`
+	ID         string `json:"id"`
+	Name       string `json:"name"`
+	IsBot      bool   `json:"is_bot"`
+	IsAlive    bool   `json:"is_alive"`
+	Avatar     string `json:"avatar"`
+	Expression string `json:"expression"`
+	Bubble     string `json:"bubble"`
+	TargetID   string `json:"target_id"`
 }
 
 // PrivatePlayerView her istemciye özel gönderilen nihai nesne

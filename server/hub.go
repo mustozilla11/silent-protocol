@@ -105,6 +105,8 @@ type InMessage struct {
 	Received    []game.Policy `json:"received,omitempty"`
 	TargetID    string        `json:"target_id,omitempty"`
 	Chip        string        `json:"chip,omitempty"`
+	Expression  string        `json:"expression,omitempty"`
+	Bubble      string        `json:"bubble,omitempty"`
 }
 
 func (c *Client) readPump() {
@@ -173,6 +175,9 @@ func (c *Client) readPump() {
 
 		case "finish_marking":
 			c.hub.room.FinishSuspicionMarking()
+
+		case "gesture":
+			c.hub.room.SetExpression(c.playerID, in.Expression, in.Bubble, in.TargetID)
 		}
 	}
 }

@@ -1,4 +1,4 @@
-VERSION ?= v0.2.0
+VERSION ?= v0.3.0
 BIN_DIR ?= bin
 BINARY ?= $(BIN_DIR)/silent-protocol
 INSTALL_BIN ?= $(HOME)/.local/bin
@@ -32,6 +32,7 @@ install: build
 	mkdir -p $(INSTALL_ICONS)
 	
 	# ~/.local/bin/ içine ikili dosya kopyalama/bağlama
+	rm -f $(INSTALL_BIN)/silent-protocol
 	cp $(BINARY) $(INSTALL_BIN)/silent-protocol
 	chmod +x $(INSTALL_BIN)/silent-protocol
 	

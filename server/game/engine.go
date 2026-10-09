@@ -7,7 +7,7 @@ import (
 	"time"
 )
 
-const AppVersion = "v0.2.0"
+const AppVersion = "v0.3.0"
 
 type Room struct {
 	mu           sync.RWMutex
@@ -532,6 +532,15 @@ func (r *Room) checkClaims() {
 			r.CurrentClaim.HasConflict = true
 			r.CurrentClaim.ConflictNote = fmt.Sprintf("ÇELİŞKİ! Lider %d Mavi/%d Kırmızı verdiğini, Ortak ise %d Mavi/%d Kırmızı aldığını iddia ediyor!", lPassedBlue, lPassedRed, pRecBlue, pRecRed)
 			r.addLog("⚡ DİKKAT: BEYANLARDA ÇELİŞKİ TESPİT EDİLDİ! BİRİ YALAN SÖYLÜYOR!", "conflict")
+
+			reactions := []string{"Ha?!", "Aha!", "Hmm...", "Gözüm üstünde!"}
+			for i, p := range r.Players {
+				if p.IsBot {
+					p.Expression = "surprised"
+					p.Bubble = reactions[i%len(reactions)]
+					p.TargetID = r.PartnerID
+				}
+			}
 		} else {
 			r.CurrentClaim.HasConflict = false
 			r.CurrentClaim.ConflictNote = "Beyanlar birbiriyle örtüşüyor."
@@ -637,6 +646,20 @@ func (r *Room) ToggleSuspicion(sourceID, targetID, chipType string) {
 	r.notifyChange()
 }
 
+// SetExpression Oyuncunun jest, mimik ve baloncuk ifadesini günceller
+func (r *Room) SetExpression(playerID, expr, bubble, targetID string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	p := r.getPlayerByID(playerID)
+	if p != nil {
+		p.Expression = expr
+		p.Bubble = bubble
+		p.TargetID = targetID
+	}
+	r.notifyChange()
+}
+
 // FinishSuspicionMarking Sonraki tura geç
 func (r *Room) FinishSuspicionMarking() {
 	r.mu.Lock()
@@ -730,11 +753,14 @@ func (r *Room) GetPrivateView(playerID string) PrivatePlayerView {
 	publicPlayers := make([]PlayerPublic, len(r.Players))
 	for i, p := range r.Players {
 		publicPlayers[i] = PlayerPublic{
-			ID:      p.ID,
-			Name:    p.Name,
-			IsBot:   p.IsBot,
-			IsAlive: p.IsAlive,
-			Avatar:  p.Avatar,
+			ID:         p.ID,
+			Name:       p.Name,
+			IsBot:      p.IsBot,
+			IsAlive:    p.IsAlive,
+			Avatar:     p.Avatar,
+			Expression: p.Expression,
+			Bubble:     p.Bubble,
+			TargetID:   p.TargetID,
 		}
 	}
 

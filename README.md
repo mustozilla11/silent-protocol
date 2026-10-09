@@ -1,6 +1,20 @@
-# 🛡️ Sessiz Protokol (Silent Protocol) - v0.2.0
+# 🛡️ Sessiz Protokol (Silent Protocol) - v0.3.0
 
 > Sesli veya yazılı sohbet içermeyen; tamamen **"işaretler, iddialar ve veri logları"** üzerinden oynanan sessiz bir masabaşı sosyal çıkarım (social deduction) oyunu.
+
+---
+
+## 📌 v0.3.0 Yenilikleri: Mimik & İşaret Sistemi
+- **Dinamik Göz ve Mimik Motoru**:
+  - Karakterlerin gözbebekleri sağa ve sola kayarak diğer oyuncuları süzer (`👈 Solu Süz`, `👉 Sağı Süz`).
+  - Gözler fal taşı gibi açılır (`😲 Ha?!`), ampul parıltısıyla kısılır (`💡 Aha!`), tek kaş kalkıp gözler yukarı dikilir (`🧐 Hmm...`).
+- **İşaret Parmağı Jesti (Pointing)**:
+  - Karakterler masaya ellerini uzatıp şüpheli gördükleri kişiyi işaret parmağıyla gösterebilir (`🫵 İşaret Et`).
+- **Sessiz Reaksiyon Baloncukları (Murmur Bubbles)**:
+  - Karakterlerin kafasının üzerinde beliren çizgi roman baloncukları: `"Hmm..."`, `"Ha?!"`, `"Aha!"`, `"👉 Sen!"`.
+  - Masada çelişki patladığında botlar otomatik olarak `"Ha?!"` ve `"Aha!"` baloncuklarıyla şüpheliye döner!
+- **Oyuncu Mimik Çarkı**:
+  - Koltuğunun altındaki mimik butonlarıyla istediğin zaman masaya sessiz tepkini yansıtabilirsin.
 
 ---
 
