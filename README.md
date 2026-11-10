@@ -1,6 +1,17 @@
-# 🛡️ Sessiz Protokol (Silent Protocol) - v0.4.0 (3D Sürüm)
+# 🛡️ Sessiz Protokol (Silent Protocol) - v0.5.0
 
 > Sesli veya yazılı sohbet içermeyen; tamamen **"işaretler, iddialar ve veri logları"** üzerinden oynanan sessiz bir **3D masabaşı sosyal çıkarım (social deduction)** oyunu.
+
+---
+
+## 📌 v0.5.0 Yenilikleri: Başlangıç Menüsü & 3D Oyun Alanı Ayrımı
+- **Klasik & Şık Başlangıç Menüsü**:
+  - Oyun açıldığında doğrudan 3D render yükü bindirmek yerine temiz, modern ve atmosferik bir ana menü karşılar.
+  - "Masaya Otur ve Oyunu Başlat" butonuyla sinematik şekilde doğrudan 3D masabaşı oyun alanına geçiş yapılır.
+- **Sadece Oyun Alanında 3D Masa**:
+  - 3D Three.js masası yalnızca oyun başladığında aktifleşir, gereksiz arka plan işlemci tüketimini önler.
+- **Sağ Altta Canlı Olay Paneli**:
+  - Oyun sırasında tüm oylama, iddia ve çelişki logları sağ alttaki HUD panelinden takip edilir.
 
 ---
 

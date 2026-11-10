@@ -23,7 +23,7 @@ import {
 import { CharacterAvatar, ReactionBubble } from './components/Characters';
 import { Table3D } from './components/Table3D';
 
-const VERSION = "v0.4.0";
+const VERSION = "v0.5.0";
 const ROUND_TIME_LIMIT = 12; // 12 saniyelik gerilim süresi
 
 export default function App() {
@@ -234,177 +234,228 @@ export default function App() {
         </div>
       </header>
 
-      {/* MERKEZ: 3D MASA SAHNESİ VE OYUN ALANI */}
-      <main className="flex-1 max-w-7xl w-full mx-auto p-3 md:p-5 flex flex-col gap-4">
+      {/* MERKEZ ALAN */}
+      {pub.phase === "LOBBY" ? (
+        /* BAŞLANGIÇ MENÜSÜ / LOBİ GÖRÜNÜMÜ */
+        <main className="flex-1 max-w-4xl w-full mx-auto p-4 md:p-8 flex flex-col justify-center items-center">
+          <div className={`w-full rounded-3xl border p-8 md:p-12 shadow-2xl text-center backdrop-blur-md relative overflow-hidden transition-all ${
+            isDark ? 'bg-[#12141a]/95 border-zinc-800' : 'bg-white/95 border-zinc-300'
+          }`}>
+            <div className="w-16 h-16 rounded-2xl bg-amber-600/20 border border-amber-600/40 flex items-center justify-center text-amber-500 font-serif font-black text-2xl mx-auto mb-4 shadow-md">
+              SP
+            </div>
+            
+            <h2 className="text-2xl md:text-4xl font-serif font-black tracking-wider mb-2">
+              SESSİZ PROTOKOL
+            </h2>
+            <p className="text-sm md:text-base opacity-75 max-w-lg mx-auto mb-8 font-serif leading-relaxed">
+              Ses ve sohbet yok. Tamamen 3D masada jestler, bakışlar, iddialar ve veri logları üzerinden oynanan sosyal çıkarım oyunu.
+            </p>
 
-        {/* 1. THREE.JS 3D MASA SAHNESİ */}
-        <div className="w-full relative">
-          <Table3D 
-            players={pub.players || []}
-            yourId={yourId}
-            phase={pub.phase}
-            votes={pub.votes || {}}
-            lastVoteItem={pub.last_vote_item}
-            bluePolicies={pub.blue_policies || 0}
-            redPolicies={pub.red_policies || 0}
-            chaosCounter={pub.chaos_counter || 0}
-            currentClaim={pub.current_claim}
-          />
-
-          {/* SOL ÜSTTE: GİZLİ KİMLİK KARTI (OVERLAY) */}
-          <div className="absolute top-3 left-3 z-30 max-w-[240px]">
-            <div className={`p-3 rounded-2xl border backdrop-blur-md shadow-2xl transition-all ${
-              isDark ? 'bg-[#12141a]/95 border-zinc-700/80' : 'bg-white/95 border-zinc-300'
-            }`}>
-              <div className="flex items-center justify-between border-b pb-1.5 mb-2 border-zinc-700/40">
-                <span className="text-[10px] font-serif font-bold uppercase tracking-wider flex items-center gap-1 opacity-80">
-                  <FileText className="w-3.5 h-3.5 text-amber-500" /> Gizli Dosyan
-                </span>
-                <button
-                  onClick={() => setShowRoleSecret(!showRoleSecret)}
-                  className="text-[10px] opacity-70 hover:opacity-100 flex items-center gap-1"
-                >
-                  <Eye className="w-3 h-3" />
-                  <span>{showRoleSecret ? "Gizle" : "Aç"}</span>
-                </button>
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 max-w-xl mx-auto mb-8 text-left text-xs">
+              <div className={`p-4 rounded-xl border ${isDark ? 'bg-zinc-900/60 border-zinc-800' : 'bg-zinc-50 border-zinc-200'}`}>
+                <div className="text-amber-500 font-bold mb-1 flex items-center gap-1.5 font-serif text-sm">
+                  <span>🎲</span> 3D İnteraktif Masa
+                </div>
+                <p className="opacity-70 leading-normal">Karakterler sağa-sola bakar, şüphelenince göz süzer ve parmakla işaret eder.</p>
               </div>
 
-              {showRoleSecret ? (
-                <div className={`p-2 rounded-xl border text-center ${
-                  yourRole === "PROTECTOR"
-                    ? "bg-slate-900/90 border-blue-600/40 text-blue-200"
-                    : yourRole === "SPY"
-                    ? "bg-rose-950/70 border-rose-600/40 text-rose-200"
-                    : yourRole === "SECRET_LEADER"
-                    ? "bg-purple-950/70 border-purple-600/40 text-purple-200"
-                    : "bg-zinc-900 border-zinc-800 text-zinc-500"
-                }`}>
-                  <div className="text-xl">
-                    {yourRole === "PROTECTOR" && "🛡️"}
-                    {yourRole === "SPY" && "🕵️"}
-                    {yourRole === "SECRET_LEADER" && "👑"}
-                    {!yourRole && "⏳"}
-                  </div>
-                  <div className="text-xs font-serif font-black tracking-wide">
-                    {yourRole === "PROTECTOR" && "KORUYUCU"}
-                    {yourRole === "SPY" && "CASUS"}
-                    {yourRole === "SECRET_LEADER" && "GİZLİ LİDER"}
-                    {!yourRole && "LOBİ"}
-                  </div>
-                  {(yourRole === "SPY" || yourRole === "SECRET_LEADER") && (
-                    <div className="mt-1.5 pt-1.5 border-t border-zinc-700/40 text-left text-[10px]">
-                      {secretLeaderId && (
-                        <div>Lider: <strong className="text-purple-400">{pub.players?.find(p => p.id === secretLeaderId)?.name}</strong></div>
-                      )}
-                      {knownAllies.length > 0 && (
-                        <div>Casus: <strong className="text-rose-400">{knownAllies.map(id => pub.players?.find(p => p.id === id)?.name).join(", ")}</strong></div>
-                      )}
-                    </div>
-                  )}
+              <div className={`p-4 rounded-xl border ${isDark ? 'bg-zinc-900/60 border-zinc-800' : 'bg-zinc-50 border-zinc-200'}`}>
+                <div className="text-amber-500 font-bold mb-1 flex items-center gap-1.5 font-serif text-sm">
+                  <span>⏱️</span> 10s Karar Süresi
                 </div>
-              ) : (
-                <div className="text-[10px] opacity-50 text-center py-2">
-                  🔒 Dosya Kapalı
+                <p className="opacity-70 leading-normal">Oldu-bittiye gelmeyen, botların düşünüp hamle yaptığı gerilimli masa temposu.</p>
+              </div>
+
+              <div className={`p-4 rounded-xl border ${isDark ? 'bg-zinc-900/60 border-zinc-800' : 'bg-zinc-50 border-zinc-200'}`}>
+                <div className="text-amber-500 font-bold mb-1 flex items-center gap-1.5 font-serif text-sm">
+                  <span>📜</span> Çelişki Motoru
                 </div>
-              )}
+                <p className="opacity-70 leading-normal">Lider ve Ortak ne çektiklerini beyan eder, ifadeler çelişirse alarm çalar!</p>
+              </div>
             </div>
+
+            <button
+              onClick={() => sendAction("start_game")}
+              className="px-8 py-4 bg-gradient-to-r from-amber-600 to-amber-700 hover:from-amber-500 hover:to-amber-600 text-white font-serif font-black text-sm md:text-base rounded-2xl shadow-xl transition-all transform hover:-translate-y-0.5 active:translate-y-0 flex items-center gap-3 mx-auto"
+            >
+              <Sparkles className="w-5 h-5 text-amber-200" />
+              <span>MASAYA OTUR VE OYUNU BAŞLAT</span>
+            </button>
           </div>
-        </div>
+        </main>
+      ) : (
+        /* OYUN ALANI (3D MASA + KONTROLLER) */
+        <main className="flex-1 max-w-7xl w-full mx-auto p-3 md:p-5 flex flex-col gap-4">
 
-        {/* 2. OYUNCUNUN KONTROL KONSOLU & SESSİZ MİMİK ÇARKI */}
-        <div className="grid grid-cols-1 md:grid-cols-12 gap-4">
-          
-          {/* SOL: SENİN KOLTUĞUN & MİMİK/JEST ÇARKI (5 KOLON) */}
-          <div className="md:col-span-5 flex flex-col gap-3">
-            <div className={`p-3.5 rounded-2xl border shadow-lg relative ${
-              isDark ? 'bg-[#12141a] border-zinc-800' : 'bg-white border-zinc-300'
-            }`}>
-              <ReactionBubble text={you.bubble} />
+          {/* 1. THREE.JS 3D MASA SAHNESİ */}
+          <div className="w-full relative">
+            <Table3D 
+              players={pub.players || []}
+              yourId={yourId}
+              phase={pub.phase}
+              votes={pub.votes || {}}
+              lastVoteItem={pub.last_vote_item}
+              bluePolicies={pub.blue_policies || 0}
+              redPolicies={pub.red_policies || 0}
+              chaosCounter={pub.chaos_counter || 0}
+              currentClaim={pub.current_claim}
+            />
 
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-3">
-                  <CharacterAvatar id="player" expression={you.expression || "neutral"} className="w-12 h-12" />
-                  <div>
-                    <div className="flex items-center gap-1.5">
-                      <span className="font-bold text-xs">{you.name}</span>
-                      <span className="text-[9px] font-bold px-1.5 py-0.2 rounded bg-amber-600/20 text-amber-500 border border-amber-600/30">
-                        SEN
-                      </span>
-                    </div>
-                    <div className="flex gap-1 mt-1">
-                      {you.id === pub.leader_id && (
-                        <span className="text-[9px] font-bold px-1.5 py-0.5 rounded bg-amber-500 text-black flex items-center gap-1">
-                          <Crown className="w-2.5 h-2.5" /> LİDER
-                        </span>
-                      )}
-                      {you.id === pub.partner_id && (
-                        <span className="text-[9px] font-bold px-1.5 py-0.5 rounded bg-purple-600 text-white flex items-center gap-1">
-                          <Briefcase className="w-2.5 h-2.5" /> ORTAK
-                        </span>
-                      )}
-                    </div>
-                  </div>
+            {/* SOL ÜSTTE: GİZLİ KİMLİK KARTI (OVERLAY) */}
+            <div className="absolute top-3 left-3 z-30 max-w-[240px]">
+              <div className={`p-3 rounded-2xl border backdrop-blur-md shadow-2xl transition-all ${
+                isDark ? 'bg-[#12141a]/95 border-zinc-700/80' : 'bg-white/95 border-zinc-300'
+              }`}>
+                <div className="flex items-center justify-between border-b pb-1.5 mb-2 border-zinc-700/40">
+                  <span className="text-[10px] font-serif font-bold uppercase tracking-wider flex items-center gap-1 opacity-80">
+                    <FileText className="w-3.5 h-3.5 text-amber-500" /> Gizli Dosyan
+                  </span>
+                  <button
+                    onClick={() => setShowRoleSecret(!showRoleSecret)}
+                    className="text-[10px] opacity-70 hover:opacity-100 flex items-center gap-1"
+                  >
+                    <Eye className="w-3 h-3" />
+                    <span>{showRoleSecret ? "Gizle" : "Aç"}</span>
+                  </button>
                 </div>
 
-                {pub.phase === "VOTING" && (
-                  <span className="text-[10px] font-mono font-bold px-2 py-1 rounded bg-amber-950/80 text-amber-300 border border-amber-800 animate-pulse">
-                    Oy Bekleniyor
-                  </span>
+                {showRoleSecret ? (
+                  <div className={`p-2 rounded-xl border text-center ${
+                    yourRole === "PROTECTOR"
+                      ? "bg-slate-900/90 border-blue-600/40 text-blue-200"
+                      : yourRole === "SPY"
+                      ? "bg-rose-950/70 border-rose-600/40 text-rose-200"
+                      : yourRole === "SECRET_LEADER"
+                      ? "bg-purple-950/70 border-purple-600/40 text-purple-200"
+                      : "bg-zinc-900 border-zinc-800 text-zinc-500"
+                  }`}>
+                    <div className="text-xl">
+                      {yourRole === "PROTECTOR" && "🛡️"}
+                      {yourRole === "SPY" && "🕵️"}
+                      {yourRole === "SECRET_LEADER" && "👑"}
+                      {!yourRole && "⏳"}
+                    </div>
+                    <div className="text-xs font-serif font-black tracking-wide">
+                      {yourRole === "PROTECTOR" && "KORUYUCU"}
+                      {yourRole === "SPY" && "CASUS"}
+                      {yourRole === "SECRET_LEADER" && "GİZLİ LİDER"}
+                      {!yourRole && "LOBİ"}
+                    </div>
+                    {(yourRole === "SPY" || yourRole === "SECRET_LEADER") && (
+                      <div className="mt-1.5 pt-1.5 border-t border-zinc-700/40 text-left text-[10px]">
+                        {secretLeaderId && (
+                          <div>Lider: <strong className="text-purple-400">{pub.players?.find(p => p.id === secretLeaderId)?.name}</strong></div>
+                        )}
+                        {knownAllies.length > 0 && (
+                          <div>Casus: <strong className="text-rose-400">{knownAllies.map(id => pub.players?.find(p => p.id === id)?.name).join(", ")}</strong></div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  <div className="text-[10px] opacity-50 text-center py-2">
+                    🔒 Dosya Kapalı
+                  </div>
                 )}
               </div>
-
-              {/* SESSİZ MİMİK & REAKSİYON BUTONLARI */}
-              <div className="mt-3 pt-2.5 border-t border-zinc-700/40">
-                <span className="text-[10px] font-serif uppercase tracking-wider opacity-60 font-bold block mb-1.5">
-                  🎭 Sessiz Mimik & Jestlerin (Kafan döner ve baloncuk çıkar):
-                </span>
-                <div className="grid grid-cols-3 gap-1.5 text-[11px]">
-                  <button
-                    onClick={() => sendGesture("thinking", "Hmm...")}
-                    className="p-1.5 rounded-lg border bg-zinc-900/60 hover:bg-zinc-800 border-zinc-700 text-amber-400 font-bold active:scale-95 text-center"
-                  >
-                    🧐 Hmm...
-                  </button>
-                  <button
-                    onClick={() => sendGesture("surprised", "Ha?!")}
-                    className="p-1.5 rounded-lg border bg-zinc-900/60 hover:bg-zinc-800 border-zinc-700 text-rose-400 font-bold active:scale-95 text-center"
-                  >
-                    😲 Ha?!
-                  </button>
-                  <button
-                    onClick={() => sendGesture("eureka", "Aha!")}
-                    className="p-1.5 rounded-lg border bg-zinc-900/60 hover:bg-zinc-800 border-zinc-700 text-yellow-300 font-bold active:scale-95 text-center"
-                  >
-                    💡 Aha!
-                  </button>
-                  <button
-                    onClick={() => sendGesture("look_left", "👈...")}
-                    className="p-1.5 rounded-lg border bg-zinc-900/60 hover:bg-zinc-800 border-zinc-700 text-zinc-300 font-bold active:scale-95 text-center"
-                  >
-                    👈 Solu Süz
-                  </button>
-                  <button
-                    onClick={() => sendGesture("look_right", "...👉")}
-                    className="p-1.5 rounded-lg border bg-zinc-900/60 hover:bg-zinc-800 border-zinc-700 text-zinc-300 font-bold active:scale-95 text-center"
-                  >
-                    👉 Sağı Süz
-                  </button>
-                  <button
-                    onClick={() => sendGesture("pointing", "👉 Sen!")}
-                    className="p-1.5 rounded-lg border bg-zinc-900/60 hover:bg-zinc-800 border-zinc-700 text-red-400 font-bold active:scale-95 text-center"
-                  >
-                    🫵 İşaret Et
-                  </button>
-                </div>
-              </div>
             </div>
           </div>
 
-          {/* SAĞ: DİNAMİK KARAR ALANI (7 KOLON) */}
-          <div className="md:col-span-7 flex flex-col gap-3">
-            <div className={`p-4 rounded-2xl border shadow-lg flex-1 ${
-              isDark ? 'bg-[#12141a] border-zinc-800' : 'bg-white border-zinc-300'
-            }`}>
+          {/* 2. OYUNCUNUN KONTROL KONSOLU & SESSİZ MİMİK ÇARKI */}
+          <div className="grid grid-cols-1 md:grid-cols-12 gap-4">
+            
+            {/* SOL: SENİN KOLTUĞUN & MİMİK/JEST ÇARKI (5 KOLON) */}
+            <div className="md:col-span-5 flex flex-col gap-3">
+              <div className={`p-3.5 rounded-2xl border shadow-lg relative ${
+                isDark ? 'bg-[#12141a] border-zinc-800' : 'bg-white border-zinc-300'
+              }`}>
+                <ReactionBubble text={you.bubble} />
+
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-3">
+                    <CharacterAvatar id="player" expression={you.expression || "neutral"} className="w-12 h-12" />
+                    <div>
+                      <div className="flex items-center gap-1.5">
+                        <span className="font-bold text-xs">{you.name}</span>
+                        <span className="text-[9px] font-bold px-1.5 py-0.2 rounded bg-amber-600/20 text-amber-500 border border-amber-600/30">
+                          SEN
+                        </span>
+                      </div>
+                      <div className="flex gap-1 mt-1">
+                        {you.id === pub.leader_id && (
+                          <span className="text-[9px] font-bold px-1.5 py-0.5 rounded bg-amber-500 text-black flex items-center gap-1">
+                            <Crown className="w-2.5 h-2.5" /> LİDER
+                          </span>
+                        )}
+                        {you.id === pub.partner_id && (
+                          <span className="text-[9px] font-bold px-1.5 py-0.5 rounded bg-purple-600 text-white flex items-center gap-1">
+                            <Briefcase className="w-2.5 h-2.5" /> ORTAK
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+
+                  {pub.phase === "VOTING" && (
+                    <span className="text-[10px] font-mono font-bold px-2 py-1 rounded bg-amber-950/80 text-amber-300 border border-amber-800 animate-pulse">
+                      Oy Bekleniyor
+                    </span>
+                  )}
+                </div>
+
+                {/* SESSİZ MİMİK & REAKSİYON BUTONLARI */}
+                <div className="mt-3 pt-2.5 border-t border-zinc-700/40">
+                  <span className="text-[10px] font-serif uppercase tracking-wider opacity-60 font-bold block mb-1.5">
+                    🎭 Sessiz Mimik & Jestlerin (Kafan döner ve baloncuk çıkar):
+                  </span>
+                  <div className="grid grid-cols-3 gap-1.5 text-[11px]">
+                    <button
+                      onClick={() => sendGesture("thinking", "Hmm...")}
+                      className="p-1.5 rounded-lg border bg-zinc-900/60 hover:bg-zinc-800 border-zinc-700 text-amber-400 font-bold active:scale-95 text-center"
+                    >
+                      🧐 Hmm...
+                    </button>
+                    <button
+                      onClick={() => sendGesture("surprised", "Ha?!")}
+                      className="p-1.5 rounded-lg border bg-zinc-900/60 hover:bg-zinc-800 border-zinc-700 text-rose-400 font-bold active:scale-95 text-center"
+                    >
+                      😲 Ha?!
+                    </button>
+                    <button
+                      onClick={() => sendGesture("eureka", "Aha!")}
+                      className="p-1.5 rounded-lg border bg-zinc-900/60 hover:bg-zinc-800 border-zinc-700 text-yellow-300 font-bold active:scale-95 text-center"
+                    >
+                      💡 Aha!
+                    </button>
+                    <button
+                      onClick={() => sendGesture("look_left", "👈...")}
+                      className="p-1.5 rounded-lg border bg-zinc-900/60 hover:bg-zinc-800 border-zinc-700 text-zinc-300 font-bold active:scale-95 text-center"
+                    >
+                      👈 Solu Süz
+                    </button>
+                    <button
+                      onClick={() => sendGesture("look_right", "...👉")}
+                      className="p-1.5 rounded-lg border bg-zinc-900/60 hover:bg-zinc-800 border-zinc-700 text-zinc-300 font-bold active:scale-95 text-center"
+                    >
+                      👉 Sağı Süz
+                    </button>
+                    <button
+                      onClick={() => sendGesture("pointing", "👉 Sen!")}
+                      className="p-1.5 rounded-lg border bg-zinc-900/60 hover:bg-zinc-800 border-zinc-700 text-red-400 font-bold active:scale-95 text-center"
+                    >
+                      🫵 İşaret Et
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* SAĞ: DİNAMİK KARAR ALANI (7 KOLON) */}
+            <div className="md:col-span-7 flex flex-col gap-3">
+              <div className={`p-4 rounded-2xl border shadow-lg flex-1 ${
+                isDark ? 'bg-[#12141a] border-zinc-800' : 'bg-white border-zinc-300'
+              }`}>
               
               {/* LOBİ */}
               {pub.phase === "LOBBY" && (
@@ -743,6 +794,7 @@ export default function App() {
         </div>
 
       </main>
+      )}
 
       {/* 3. SAĞ ALT KÖŞEDE SABİT VE ŞIK CANLI OLAY LOG PANELİ (HUD) */}
       <div className={`fixed bottom-4 right-4 z-40 w-80 md:w-96 rounded-2xl border shadow-2xl backdrop-blur-md transition-all duration-300 ${

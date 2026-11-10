@@ -400,7 +400,7 @@ export function Table3D({
   }, [players, votes, lastVoteItem, bluePolicies, redPolicies, chaosCounter, currentClaim, phase]);
 
   return (
-    <div className="relative w-full h-[480px] md:h-[560px] rounded-3xl overflow-hidden shadow-2xl border border-zinc-800">
+    <div className="relative w-full h-[380px] sm:h-[440px] md:h-[480px] rounded-3xl overflow-hidden shadow-2xl border border-zinc-800">
       <div ref={mountRef} className="w-full h-full cursor-grab active:cursor-grabbing" />
       
       {/* 3D Sahne Üzerinde Karakter Konuşma / Tepki Baloncukları HUD */}

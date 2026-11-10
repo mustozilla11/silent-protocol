@@ -7,7 +7,7 @@ import (
 	"time"
 )
 
-const AppVersion = "v0.4.0"
+const AppVersion = "v0.5.0"
 
 type Room struct {
 	mu           sync.RWMutex
