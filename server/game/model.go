@@ -18,16 +18,16 @@ const (
 type GamePhase string
 
 const (
-	PhaseLobby             GamePhase = "LOBBY"
-	PhaseNomination        GamePhase = "NOMINATION"
-	PhaseVoting            GamePhase = "VOTING"
-	PhaseLegislateLeader   GamePhase = "LEGISLATE_LEADER"
-	PhaseLegislatePartner  GamePhase = "LEGISLATE_PARTNER"
-	PhaseClaiming          GamePhase = "CLAIMING"
-	PhasePowersPeek        GamePhase = "POWERS_PEEK"
-	PhasePowersExecution   GamePhase = "POWERS_EXECUTION"
-	PhaseSuspicionMarking  GamePhase = "SUSPICION_MARKING"
-	PhaseGameOver          GamePhase = "GAME_OVER"
+	PhaseLobby            GamePhase = "LOBBY"
+	PhaseNomination       GamePhase = "NOMINATION"
+	PhaseVoting           GamePhase = "VOTING"
+	PhaseLegislateLeader  GamePhase = "LEGISLATE_LEADER"
+	PhaseLegislatePartner GamePhase = "LEGISLATE_PARTNER"
+	PhaseClaiming         GamePhase = "CLAIMING"
+	PhasePowersPeek       GamePhase = "POWERS_PEEK"
+	PhasePowersExecution  GamePhase = "POWERS_EXECUTION"
+	PhaseSuspicionMarking GamePhase = "SUSPICION_MARKING"
+	PhaseGameOver         GamePhase = "GAME_OVER"
 )
 
 type Player struct {
@@ -54,14 +54,14 @@ type Claim struct {
 }
 
 type VoteHistoryItem struct {
-	Round        int               `json:"round"`
-	LeaderID     string            `json:"leader_id"`
-	LeaderName   string            `json:"leader_name"`
-	PartnerID    string            `json:"partner_id"`
-	PartnerName  string            `json:"partner_name"`
-	Passed       bool              `json:"passed"`
-	Votes        map[string]string `json:"votes"` // playerID -> "YES" / "NO"
-	EnactedPolicy Policy           `json:"enacted_policy,omitempty"`
+	Round         int               `json:"round"`
+	LeaderID      string            `json:"leader_id"`
+	LeaderName    string            `json:"leader_name"`
+	PartnerID     string            `json:"partner_id"`
+	PartnerName   string            `json:"partner_name"`
+	Passed        bool              `json:"passed"`
+	Votes         map[string]string `json:"votes"` // playerID -> "YES" / "NO"
+	EnactedPolicy Policy            `json:"enacted_policy,omitempty"`
 }
 
 type LogEntry struct {
@@ -72,27 +72,29 @@ type LogEntry struct {
 
 // PublicGameState istemciye gönderilen filtrelenmiş durumdur
 type PublicGameState struct {
-	Phase           GamePhase                  `json:"phase"`
-	Round           int                        `json:"round"`
-	ChaosCounter    int                        `json:"chaos_counter"` // 3 olunca kaos patlar
-	BluePolicies    int                        `json:"blue_policies"` // 5 olursa Koruyucu zaferi
-	RedPolicies     int                        `json:"red_policies"`  // 6 olursa Casus zaferi
-	DeckCount       int                        `json:"deck_count"`
-	DiscardCount    int                        `json:"discard_count"`
-	Players         []PlayerPublic             `json:"players"`
-	LeaderID        string                     `json:"leader_id"`
-	PartnerID       string                     `json:"partner_id"`
-	PrevLeaderID    string                     `json:"prev_leader_id"`
-	PrevPartnerID   string                     `json:"prev_partner_id"`
-	Votes           map[string]string          `json:"votes"` // Oylama bitince açılır
-	LastVoteItem    *VoteHistoryItem           `json:"last_vote_item,omitempty"`
-	History         []VoteHistoryItem          `json:"history"`
-	Logs            []LogEntry                 `json:"logs"`
-	CurrentClaim    *Claim                     `json:"current_claim,omitempty"`
-	Winner          string                     `json:"winner,omitempty"` // "PROTECTORS" veya "SPIES"
-	WinReason       string                     `json:"win_reason,omitempty"`
-	Suspicions      map[string]map[string]string `json:"suspicions"` // sourceID -> (targetID -> "SUSPICIOUS"/"TRUSTED")
-	Version         string                     `json:"version"`
+	Phase          GamePhase                    `json:"phase"`
+	Round          int                          `json:"round"`
+	PhaseDuration  int                          `json:"phase_duration"`
+	PhaseRemaining int                          `json:"phase_remaining"`
+	ChaosCounter   int                          `json:"chaos_counter"` // 3 olunca kaos patlar
+	BluePolicies   int                          `json:"blue_policies"` // 5 olursa Koruyucu zaferi
+	RedPolicies    int                          `json:"red_policies"`  // 6 olursa Casus zaferi
+	DeckCount      int                          `json:"deck_count"`
+	DiscardCount   int                          `json:"discard_count"`
+	Players        []PlayerPublic               `json:"players"`
+	LeaderID       string                       `json:"leader_id"`
+	PartnerID      string                       `json:"partner_id"`
+	PrevLeaderID   string                       `json:"prev_leader_id"`
+	PrevPartnerID  string                       `json:"prev_partner_id"`
+	Votes          map[string]string            `json:"votes"` // Oylama bitince açılır
+	LastVoteItem   *VoteHistoryItem             `json:"last_vote_item,omitempty"`
+	History        []VoteHistoryItem            `json:"history"`
+	Logs           []LogEntry                   `json:"logs"`
+	CurrentClaim   *Claim                       `json:"current_claim,omitempty"`
+	Winner         string                       `json:"winner,omitempty"` // "PROTECTORS" veya "SPIES"
+	WinReason      string                       `json:"win_reason,omitempty"`
+	Suspicions     map[string]map[string]string `json:"suspicions"` // sourceID -> (targetID -> "SUSPECT"/"TRUSTED")
+	Version        string                       `json:"version"`
 }
 
 type PlayerPublic struct {
@@ -108,11 +110,11 @@ type PlayerPublic struct {
 
 // PrivatePlayerView her istemciye özel gönderilen nihai nesne
 type PrivatePlayerView struct {
-	PublicState     PublicGameState `json:"public_state"`
-	YourID          string          `json:"your_id"`
-	YourRole        Role            `json:"your_role"`
-	KnownAllies     []string        `json:"known_allies"`     // Casus ise bildiği diğer casuslar
-	SecretLeaderID  string          `json:"secret_leader_id"` // Casus ise gizli liderin ID'si
-	DrawnPolicies   []Policy        `json:"drawn_policies,omitempty"` // Sadece lider/ortak kart seçimindeyken
-	PeekedPolicies  []Policy        `json:"peeked_policies,omitempty"` // Policy peek yetkisinde
+	PublicState    PublicGameState `json:"public_state"`
+	YourID         string          `json:"your_id"`
+	YourRole       Role            `json:"your_role"`
+	KnownAllies    []string        `json:"known_allies"`              // Casus ise bildiği diğer casuslar
+	SecretLeaderID string          `json:"secret_leader_id"`          // Casus ise gizli liderin ID'si
+	DrawnPolicies  []Policy        `json:"drawn_policies,omitempty"`  // Sadece lider/ortak kart seçimindeyken
+	PeekedPolicies []Policy        `json:"peeked_policies,omitempty"` // Policy peek yetkisinde
 }

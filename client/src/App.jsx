@@ -2,40 +2,38 @@ import React, { useState, useEffect, useRef } from "react";
 import { CharacterAvatar } from "./components/Characters";
 import Table3D from "./components/Table3D";
 
-const APP_VERSION = "v0.6.0";
-
-const PHASE_DURATION = {
-  NOMINATION: 10,
-  VOTING: 10,
-  LEGISLATE_LEADER: 10,
-  LEGISLATE_PARTNER: 10,
-  CLAIMING: 10,
-  POWERS_PEEK: 8,
-  POWERS_EXECUTION: 10,
-  SUSPICION_MARKING: 7,
-};
+const APP_VERSION = "v0.7.0";
 
 export default function App() {
-  const [ws, setWs] = useState(null);
+  const [gameState, setGameState] = useState(null);
+  const [viewMeta, setViewMeta] = useState({
+    your_id: "",
+    your_role: "",
+    known_allies: [],
+    secret_leader_id: "",
+    drawn_policies: [],
+    peeked_policies: [],
+  });
   const [connected, setConnected] = useState(false);
-  const [playerId, setPlayerId] = useState(() => {
+
+  const [playerId] = useState(() => {
     const saved = sessionStorage.getItem("sp_player_id");
     if (saved) return saved;
     const newId = "p_" + Math.random().toString(36).substring(2, 9);
     sessionStorage.setItem("sp_player_id", newId);
     return newId;
   });
-  const [playerName, setPlayerName] = useState("Sen");
-  const [joined, setJoined] = useState(false);
-  const [gameState, setGameState] = useState(null);
+  const [playerName, setPlayerName] = useState(
+    () => localStorage.getItem("sp_player_name") || "Komutan"
+  );
   const [theme, setTheme] = useState(
     () => localStorage.getItem("sp_theme") || "dark"
   );
 
-  // Tur içi zamanlayıcı (10 saniyelik karar süresi)
+  // Canlı 10 saniyelik tur sayacı (sunucu remaining süresine senkron)
   const [phaseTimer, setPhaseTimer] = useState(10);
 
-  // Kamera Modu ("auto" = kart fazlarında masaya yaklaşır, "table" = sürekli masa/kart odaklı, "characters" = sürekli geniş açı)
+  // Kamera Modu ("auto" = kart fazlarında masaya yaklaşır, "table" = masa/kartlar, "characters" = tüm oyuncular)
   const [cameraMode, setCameraMode] = useState("auto");
 
   // Parmakla işaret etme ve çip koyma için seçili hedef oyuncu ID'si
@@ -58,200 +56,217 @@ export default function App() {
     "RED",
   ]);
 
+  const wsRef = useRef(null);
   const logsEndRef = useRef(null);
+  const gestureTimeoutRef = useRef(null);
 
+  // Tema senkronizasyonu
   useEffect(() => {
     document.documentElement.setAttribute("data-theme", theme);
+    document.body.className = theme === "dark" ? "theme-dark" : "theme-light";
     localStorage.setItem("sp_theme", theme);
   }, [theme]);
+
+  // WebSocket Bağlantısı (Açılışta otomatik bağlanıp Başlangıç Menüsü / Lobi gösterir)
+  useEffect(() => {
+    let closedByCleanup = false;
+    let reconnectTimer = null;
+
+    const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+    const wsUrl = `${protocol}//${window.location.host}/ws?id=${encodeURIComponent(
+      playerId
+    )}`;
+
+    function connect() {
+      if (closedByCleanup) return;
+      const socket = new WebSocket(wsUrl);
+      wsRef.current = socket;
+
+      socket.onopen = () => {
+        setConnected(true);
+        const savedName = localStorage.getItem("sp_player_name") || "Komutan";
+        socket.send(
+          JSON.stringify({
+            type: "join",
+            name: savedName,
+            avatar: "🛡️",
+          })
+        );
+      };
+
+      socket.onmessage = (event) => {
+        try {
+          const msg = JSON.parse(event.data);
+          if (msg.type === "state" && msg.payload) {
+            const payload = msg.payload;
+            setGameState(payload.public_state);
+            setViewMeta({
+              your_id: payload.your_id,
+              your_role: payload.your_role || "",
+              known_allies: payload.known_allies || [],
+              secret_leader_id: payload.secret_leader_id || "",
+              drawn_policies: payload.drawn_policies || [],
+              peeked_policies: payload.peeked_policies || [],
+            });
+          }
+        } catch (err) {
+          console.error("WS parse hatası:", err);
+        }
+      };
+
+      socket.onclose = () => {
+        setConnected(false);
+        if (!closedByCleanup) {
+          reconnectTimer = setTimeout(connect, 1500);
+        }
+      };
+    }
+
+    connect();
+
+    return () => {
+      closedByCleanup = true;
+      if (reconnectTimer) clearTimeout(reconnectTimer);
+      if (wsRef.current) wsRef.current.close();
+    };
+  }, [playerId]);
 
   useEffect(() => {
     if (logsEndRef.current) {
       logsEndRef.current.scrollIntoView({ behavior: "smooth" });
     }
-  }, [gameState?.public?.logs, hudTab]);
+  }, [gameState?.logs, hudTab]);
 
-  // Faz değiştiğinde sayacı sıfırla
+  // Faz değiştiğinde sunucunun verdiği süreden sayacı başlat
   useEffect(() => {
-    const currentPhase = gameState?.public?.phase;
-    if (!currentPhase || currentPhase === "LOBBY" || currentPhase === "GAME_OVER")
+    const curPhase = gameState?.phase;
+    if (!curPhase || curPhase === "LOBBY" || curPhase === "GAME_OVER") {
+      setPhaseTimer(10);
       return;
+    }
 
-    const maxSec = PHASE_DURATION[currentPhase] || 10;
-    setPhaseTimer(maxSec);
+    const startVal =
+      gameState?.phase_remaining > 0
+        ? gameState.phase_remaining
+        : gameState?.phase_duration || 10;
+    setPhaseTimer(startVal);
 
     const interval = setInterval(() => {
       setPhaseTimer((prev) => (prev > 0 ? prev - 1 : 0));
     }, 1000);
 
     return () => clearInterval(interval);
-  }, [gameState?.public?.phase, gameState?.public?.round]);
+  }, [gameState?.phase, gameState?.round]);
 
-  // Oyuncular yüklendiğinde varsayılan bir hedef seçili olsun (parmakla işaret etmek için hazır)
+  // Varsayılan işaret hedefi seçili olsun
   useEffect(() => {
-    const players = gameState?.public?.players || [];
-    if (players.length > 1 && !selectedTargetId) {
-      const other = players.find((p) => p.id !== playerId && p.is_alive);
-      if (other) setSelectedTargetId(other.id);
-    }
-  }, [gameState?.public?.players, playerId, selectedTargetId]);
-
-  const connectToServer = (nameToJoin) => {
-    const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-    const wsUrl = `${protocol}//${window.location.host}/ws?id=${encodeURIComponent(
-      playerId
-    )}&name=${encodeURIComponent(nameToJoin)}`;
-    const socket = new WebSocket(wsUrl);
-
-    socket.onopen = () => {
-      setConnected(true);
-      setJoined(true);
-    };
-
-    socket.onmessage = (event) => {
-      try {
-        const msg = JSON.parse(event.data);
-        if (msg.type === "STATE_UPDATE") {
-          setGameState(msg.payload);
-        }
-      } catch (err) {
-        console.error("WS parse hatası:", err);
+    const players = gameState?.players || [];
+    if (players.length > 1) {
+      const stillValid = players.some(
+        (p) => p.id === selectedTargetId && p.is_alive && p.id !== playerId
+      );
+      if (!stillValid) {
+        const other = players.find((p) => p.id !== playerId && p.is_alive);
+        if (other) setSelectedTargetId(other.id);
       }
-    };
+    }
+  }, [gameState?.players, playerId, selectedTargetId]);
 
-    socket.onclose = () => {
-      setConnected(false);
-    };
-
-    setWs(socket);
-  };
-
-  const sendAction = (action, data = {}) => {
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({ action, data }));
+  // hub.go protokolü ile birebir uyumlu gönderici
+  const sendAction = (type, data = {}) => {
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type, ...data }));
     }
   };
 
   const sendGesture = (expression, bubble, targetIdOverride = undefined) => {
     const effectiveTarget =
       targetIdOverride !== undefined ? targetIdOverride : selectedTargetId;
-    sendAction("SET_EXPRESSION", {
+    sendAction("gesture", {
       expression,
       bubble,
-      target_id: effectiveTarget,
+      target_id: effectiveTarget || "",
     });
+
+    if (gestureTimeoutRef.current) clearTimeout(gestureTimeoutRef.current);
+    if (expression !== "neutral") {
+      gestureTimeoutRef.current = setTimeout(() => {
+        sendAction("gesture", {
+          expression: "neutral",
+          bubble: "",
+          target_id: "",
+        });
+      }, 4500);
+    }
   };
 
-  // 3D sahnede bir karaktere tıklandığında hem hedef seç hem de parmakla işaret et!
+  // 3D Sahnede karaktere tıklanınca hedef seç & parmakla işaret et
   const handleSelectPlayerOnTable = (targetId) => {
     if (!targetId || targetId === playerId) return;
     setSelectedTargetId(targetId);
-    const targetObj = gameState?.public?.players?.find((p) => p.id === targetId);
+    const targetObj = gameState?.players?.find((p) => p.id === targetId);
     const tName = targetObj ? targetObj.name : "Sen";
-    sendAction("SET_EXPRESSION", {
-      expression: "pointing",
-      bubble: `👉 ${tName}!`,
-      target_id: targetId,
-    });
+    sendGesture("pointing", `👉 ${tName}!`, targetId);
+  };
+
+  // 3D Masadaki karta direkt tıklayınca ele veya yasalaştır
+  const handleSelectCardOnTable = (cardIdx) => {
+    if (!gameState) return;
+    if (
+      gameState.phase === "LEGISLATE_LEADER" &&
+      gameState.leader_id === viewMeta.your_id
+    ) {
+      sendAction("leader_discard", { index: cardIdx });
+    } else if (
+      gameState.phase === "LEGISLATE_PARTNER" &&
+      gameState.partner_id === viewMeta.your_id
+    ) {
+      sendAction("partner_enact", { index: cardIdx });
+    }
+  };
+
+  const handleNameChange = (val) => {
+    setPlayerName(val);
+    localStorage.setItem("sp_player_name", val);
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      sendAction("join", { name: val || "Komutan", avatar: "🛡️" });
+    }
   };
 
   const toggleTheme = () => {
     setTheme((prev) => (prev === "dark" ? "light" : "dark"));
   };
 
-  const leaveTable = () => {
-    if (ws) ws.close();
-    setWs(null);
-    setJoined(false);
-    setGameState(null);
-  };
+  const isDark = theme === "dark";
 
-  // --- GİRİŞ EKRANI ---
-  if (!joined || !gameState) {
+  // --- BAĞLANTI BEKLENİYOR EKRANI ---
+  if (!connected || !gameState) {
     return (
-      <div className="min-h-screen flex flex-col items-center justify-center p-6 relative">
-        <div className="absolute top-5 right-5 flex items-center gap-3">
-          <button
-            onClick={toggleTheme}
-            className="sp-btn-secondary px-3.5 py-2 rounded-xl text-xs font-bold flex items-center gap-2 cursor-pointer"
-          >
-            {theme === "dark" ? "☀️ Açık Tema (Beyaz)" : "🌙 Koyu Tema (Siyah)"}
-          </button>
-        </div>
-
-        <div className="max-w-md w-full sp-card rounded-2xl p-8 shadow-2xl">
-          <div className="flex items-center justify-between mb-3">
-            <span className="text-xs font-mono uppercase tracking-widest px-2.5 py-1 rounded bg-amber-500/15 text-amber-500 border border-amber-500/30 font-semibold">
-              3D Masaüstü Sosyal Çıkarım
-            </span>
-            <span className="text-xs font-mono sp-text-muted">{APP_VERSION}</span>
-          </div>
-
-          <h1 className="text-3xl font-extrabold tracking-tight mb-2">
-            SILENT PROTOCOL
-          </h1>
-          <p className="sp-text-muted text-sm mb-6 leading-relaxed">
-            Bir masanın etrafında toplanmış karakterler. Sözlü veya yazılı
-            sohbet yok; sadece <strong>3D parmakla işaret etme</strong>,{" "}
-            <strong>bakışlar</strong>, <strong>mimikler</strong> ("Ha?!", "Aha!",
-            "Hmm...") ve <strong>masadaki yasa kartları</strong> konuşur.
-          </p>
-
-          <div className="space-y-4">
-            <div>
-              <label className="block text-xs font-bold uppercase tracking-wider sp-text-muted mb-2">
-                Masadaki Adın
-              </label>
-              <input
-                type="text"
-                value={playerName}
-                onChange={(e) => setPlayerName(e.target.value)}
-                className="w-full bg-black/20 border border-neutral-500/30 rounded-xl px-4 py-3 font-medium focus:outline-none focus:border-amber-500 transition"
-                placeholder="Örn: Mustafa"
-              />
-            </div>
-
-            <button
-              onClick={() => connectToServer(playerName || "Oyuncu")}
-              className="w-full sp-btn-primary font-bold py-3.5 rounded-xl transition shadow-lg cursor-pointer"
-            >
-              Masaya Otur
-            </button>
-          </div>
-
-          <div className="mt-8 pt-6 border-t border-neutral-500/20 text-xs sp-text-muted space-y-2">
-            <div className="font-bold uppercase tracking-wider">
-              Nasıl Oynanır?
-            </div>
-            <p>
-              • <strong>Koruyucular (Mavi):</strong> 5 Mavi Yasa çıkarmalı veya
-              Gizli Lideri infaz etmelidir.
-            </p>
-            <p>
-              • <strong>Casuslar & Gizli Lider (Kırmızı):</strong> 6 Kırmızı
-              Yasa çıkarmalı veya 3 Kırmızı Yasadan sonra Gizli Lideri Ortak
-              seçtirmelidir.
-            </p>
-            <p>
-              • <strong>Tam Ekran 3D Masa & Sağ Alt Kumanda:</strong> Tüm
-              mimikler, parmakla işaret etme, kart seçimleri ve kayıtlar sağ
-              alttaki birleşik kumanda panelindedir.
-            </p>
-          </div>
-        </div>
+      <div className="min-h-screen flex flex-col items-center justify-center p-6 sp-card border-0">
+        <div className="w-12 h-12 rounded-full border-4 border-amber-500 border-t-transparent animate-spin mb-4" />
+        <h1 className="text-2xl font-black tracking-widest uppercase">
+          SILENT PROTOCOL
+        </h1>
+        <p className="text-sm sp-text-muted mt-2 font-mono">
+          Masaya bağlanılıyor ({window.location.host})...
+        </p>
+        <span className="mt-4 px-3 py-1 rounded text-xs font-mono sp-btn-secondary">
+          {APP_VERSION}
+        </span>
       </div>
     );
   }
 
-  const pub = gameState.public;
-  const view = gameState;
-  const isLeader = pub.leader_id === view.your_id;
-  const isPartner = pub.partner_id === view.your_id;
-  const me = pub.players.find((p) => p.id === view.your_id);
-  const otherPlayers = pub.players.filter((p) => p.id !== view.your_id);
-  const mySuspicions = pub.suspicions?.[view.your_id] || {};
+  const pub = gameState;
+  const view = viewMeta;
+  const yourId = view.your_id || playerId;
+  const isLeader = pub.leader_id === yourId;
+  const isPartner = pub.partner_id === yourId;
+  const me = pub.players.find((p) => p.id === yourId);
+  const otherPlayers = pub.players.filter((p) => p.id !== yourId);
+  const mySuspicions = pub.suspicions?.[yourId] || {};
 
-  // --- LOBİ EKRANI (BAŞLANGIÇ MENÜSÜ) ---
+  // --- BAŞLANGIÇ MENÜSÜ / LOBİ (Klasik Menü) ---
   if (pub.phase === "LOBBY") {
     return (
       <div className="min-h-screen flex flex-col">
@@ -260,37 +275,57 @@ export default function App() {
             <span className="font-black text-lg tracking-wider">
               SILENT PROTOCOL
             </span>
-            <span className="text-xs font-mono px-2 py-0.5 rounded bg-neutral-500/15 sp-text-muted">
+            <span className="text-xs font-mono px-2 py-0.5 rounded sp-btn-secondary">
               {pub.version || APP_VERSION}
             </span>
           </div>
           <div className="flex items-center gap-2">
             <button
               onClick={toggleTheme}
-              className="sp-btn-secondary px-3 py-1.5 rounded-lg text-xs font-bold cursor-pointer"
+              className="sp-btn-secondary px-3.5 py-1.5 rounded-lg text-xs font-bold cursor-pointer"
             >
-              {theme === "dark" ? "☀️ Beyaz Tema" : "🌙 Siyah Tema"}
-            </button>
-            <button
-              onClick={leaveTable}
-              className="sp-btn-secondary px-3 py-1.5 rounded-lg text-xs font-bold text-red-500 cursor-pointer"
-            >
-              Çıkış
+              {isDark ? "☀️ Beyaz Tema" : "🌙 Siyah Tema"}
             </button>
           </div>
         </header>
 
-        <main className="flex-1 flex items-center justify-center p-6">
-          <div className="max-w-3xl w-full sp-card rounded-2xl p-8 text-center shadow-xl">
-            <h2 className="text-2xl font-extrabold mb-2">
-              Masa Hazırlanıyor (Lobi)
-            </h2>
-            <p className="sp-text-muted text-sm mb-6">
-              Oyunu başlatmak için en az 5 kişi (oyuncu + bot) masada olmalı.
-              İstediğin kadar bot ekleyip çıkarabilirsin.
-            </p>
+        <main className="flex-1 flex items-center justify-center p-4 sm:p-6">
+          <div className="max-w-4xl w-full sp-card rounded-2xl p-6 sm:p-8 shadow-2xl">
+            <div className="text-center mb-6">
+              <span className="inline-block text-xs font-mono uppercase tracking-widest px-3 py-1 rounded bg-amber-500/15 text-amber-500 border border-amber-500/30 font-bold mb-2">
+                3D Masabaşı Sosyal Çıkarım Oyunu
+              </span>
+              <h1 className="text-3xl sm:text-4xl font-black tracking-tight mb-2">
+                SESSİZ PROTOKOL
+              </h1>
+              <p className="sp-text-muted text-sm max-w-xl mx-auto">
+                Sözlü veya yazılı sohbet yok. Sadece{" "}
+                <strong>3D parmakla işaret etme</strong>, sağa-sola bakışlar,
+                mimikler ("Ha?!", "Aha!", "Hmm...") ve masadaki yasa kartları
+                konuşur.
+              </p>
+            </div>
 
-            <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 gap-4 mb-8">
+            {/* Oyuncu Adı & Tema Ayarı */}
+            <div className="max-w-sm mx-auto mb-6">
+              <label className="block text-xs font-bold uppercase tracking-wider sp-text-muted mb-1.5">
+                Masadaki Adın
+              </label>
+              <input
+                type="text"
+                value={playerName}
+                onChange={(e) => handleNameChange(e.target.value)}
+                className={`w-full rounded-xl px-4 py-2.5 text-sm font-bold border focus:outline-none focus:border-amber-500 ${
+                  isDark
+                    ? "bg-black/30 border-white/15 text-white"
+                    : "bg-zinc-100 border-zinc-300 text-zinc-900"
+                }`}
+                placeholder="Adını yaz..."
+              />
+            </div>
+
+            {/* Masadaki Koltuklar */}
+            <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 gap-3 mb-6">
               {pub.players.map((p, idx) => (
                 <div
                   key={p.id}
@@ -299,7 +334,7 @@ export default function App() {
                   {p.is_bot && (
                     <button
                       onClick={() =>
-                        sendAction("REMOVE_BOT", { target_id: p.id })
+                        sendAction("remove_bot", { target_id: p.id })
                       }
                       title="Botu Masadan Kaldır"
                       className="absolute top-2 right-2 w-6 h-6 rounded-full bg-red-500/15 hover:bg-red-500/30 text-red-500 text-xs font-bold flex items-center justify-center cursor-pointer"
@@ -308,34 +343,58 @@ export default function App() {
                     </button>
                   )}
                   <CharacterAvatar
-                    id={p.avatar || idx + 1}
+                    id={
+                      p.is_bot
+                        ? ["bot-1", "bot-2", "bot-3", "bot-4"][idx % 4]
+                        : "player"
+                    }
                     expression={p.expression || "neutral"}
-                    className="w-20 h-20"
+                    className="w-16 h-16"
                   />
-                  <span className="font-bold text-sm mt-1">{p.name}</span>
+                  <span className="font-bold text-sm mt-1 truncate max-w-full">
+                    {p.name}
+                  </span>
                   <span className="text-[10px] uppercase tracking-wider sp-text-muted mt-0.5">
-                    {p.is_bot ? "Yapay Zeka Bot" : "Gerçek Oyuncu"}
+                    {p.is_bot ? "Yapay Zeka Oyuncu" : "Sen (Masada)"}
                   </span>
                 </div>
               ))}
             </div>
 
-            <div className="flex flex-wrap justify-center gap-4">
+            {/* Başlat & Bot Ekle Butonları */}
+            <div className="flex flex-wrap justify-center gap-3">
               {pub.players.length < 7 && (
                 <button
-                  onClick={() => sendAction("ADD_BOT")}
-                  className="sp-btn-secondary px-5 py-3 rounded-xl font-bold text-sm transition cursor-pointer"
+                  onClick={() => sendAction("add_bot")}
+                  className="sp-btn-secondary px-5 py-3 rounded-xl font-bold text-sm cursor-pointer"
                 >
-                  + Masaya Karakter (Bot) Ekle ({pub.players.length}/7)
+                  + Karakter Ekle ({pub.players.length}/7)
                 </button>
               )}
               <button
-                onClick={() => sendAction("START_GAME")}
-                disabled={pub.players.length < 5}
-                className="sp-btn-primary disabled:opacity-40 px-8 py-3 rounded-xl font-bold text-sm transition shadow-lg cursor-pointer"
+                onClick={() => sendAction("start_game")}
+                className="sp-btn-primary px-8 py-3 rounded-xl font-black text-sm shadow-xl cursor-pointer"
               >
-                Oyunu Başlat ({pub.players.length} Kişi)
+                🎲 Masaya Otur ve Oyunu Başlat (
+                {Math.max(5, pub.players.length)} Kişi)
               </button>
+            </div>
+
+            <div className="mt-6 pt-5 border-t border-neutral-500/20 grid sm:grid-cols-3 gap-3 text-xs sp-text-muted text-left">
+              <div>
+                <strong className="text-blue-500">🛡️ Koruyucular:</strong> 5
+                Mavi Yasa çıkarır veya Gizli Lideri infaz ederse kazanır.
+              </div>
+              <div>
+                <strong className="text-red-500">🚨 Casuslar & G.Lider:</strong>{" "}
+                6 Kırmızı Yasa veya 3 Kırmızıdan sonra Gizli Lider Ortak
+                seçilirse kazanır.
+              </div>
+              <div>
+                <strong className="text-amber-500">🎭 Tam Ekran 3D:</strong>{" "}
+                Kararlar, parmakla işaretler, mimikler ve kayıtlar sağ alttaki
+                panelde!
+              </div>
             </div>
           </div>
         </main>
@@ -343,214 +402,246 @@ export default function App() {
     );
   }
 
-  // --- TAM EKRAN 3D OYUN ALANI VE SAĞ ALT BİRLEŞİK KUMANDA PANELİ ---
+  // --- TAM EKRAN 3D OYUN ALANI + SAĞ ALT BİRLEŞİK KUMANDA HUD ---
   const selectedTargetObj = pub.players.find((p) => p.id === selectedTargetId);
+  const hudCardClass = isDark
+    ? "bg-neutral-950/90 border-white/15 text-neutral-100"
+    : "bg-white/95 border-neutral-300 text-neutral-900";
+  const subBoxClass = isDark
+    ? "bg-white/5 border-white/10"
+    : "bg-neutral-100 border-neutral-300";
 
   return (
-    <div className="fixed inset-0 w-screen h-screen overflow-hidden bg-[#0c0b0a] select-none">
-      {/* 1. TAM EKRAN 3D MASA SAHNESİ */}
+    <div
+      className={`fixed inset-0 w-screen h-screen overflow-hidden select-none ${
+        isDark ? "bg-[#221f1d]" : "bg-[#e5e7eb]"
+      }`}
+    >
+      {/* 1. TAM EKRAN 3D MASA VE KARAKTERLER */}
       <div className="absolute inset-0 w-full h-full z-0">
         <Table3D
           pub={pub}
           view={view}
           theme={theme}
-          phaseTimer={phaseTimer}
           cameraMode={cameraMode}
           selectedTargetId={selectedTargetId}
           onSelectPlayer={handleSelectPlayerOnTable}
+          onSelectCard={handleSelectCardOnTable}
         />
       </div>
 
-      {/* 2. ÜST İNCE DURUM ÇUBUĞU (YÜZEN TRANSPARAN HUD) */}
-      <header className="pointer-events-none absolute top-0 left-0 right-0 z-20 p-3 sm:px-5 flex flex-wrap items-center justify-between gap-2">
-        {/* Sol: Tur, Aşama, Süre ve Yasa Durumu */}
-        <div className="pointer-events-auto flex flex-wrap items-center gap-2 bg-black/80 backdrop-blur-md border border-white/15 px-3.5 py-2 rounded-2xl text-white shadow-2xl">
-          <span className="font-black text-sm tracking-wider text-amber-400">
-            SILENT PROTOCOL
-          </span>
-          <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-white/10 text-neutral-300">
-            {pub.version || APP_VERSION}
-          </span>
-          <span className="text-xs font-bold px-2 py-0.5 rounded bg-white/10">
-            Tur #{pub.round}
-          </span>
-          <span className="text-xs font-bold px-2.5 py-0.5 rounded bg-amber-500/20 text-amber-300 border border-amber-500/30">
-            {translatePhase(pub.phase)}
-          </span>
-          {pub.phase !== "GAME_OVER" && (
-            <span
-              className={`text-xs font-mono font-extrabold px-2 py-0.5 rounded ${
-                phaseTimer <= 3
-                  ? "bg-red-600 text-white animate-pulse"
-                  : "bg-white/10 text-amber-300"
-              }`}
-            >
-              ⏱ {phaseTimer}s
+      {/* 2. ÜST İNCE DURUM ÇUBUĞU + KART ODAK BİLGİSİ (ASLA ÜST ÜSTE BİNMEZ) */}
+      <div className="pointer-events-none fixed top-0 left-0 right-0 z-20 p-2.5 sm:px-4 flex flex-col items-center gap-1.5">
+        <header className="w-full flex flex-wrap items-center justify-between gap-2">
+          {/* Sol: Tur, Faz, 10sn Sayacı & Masadaki Yasa Durumu */}
+          <div
+            className={`pointer-events-auto flex flex-wrap items-center gap-1.5 backdrop-blur-md border px-3 py-1.5 rounded-xl shadow-xl text-[11px] ${hudCardClass}`}
+          >
+            <span className="font-black text-xs tracking-wider text-amber-500">
+              SILENT PROTOCOL
             </span>
-          )}
-
-          <div className="h-4 w-[1px] bg-white/15 mx-1 hidden sm:block" />
-
-          {/* Masa Üstü Yasa & Deste Sayaçları */}
-          <div className="flex items-center gap-2 text-xs font-bold">
-            <span
-              className="px-2 py-0.5 rounded bg-blue-600/30 border border-blue-400/40 text-blue-300"
-              title="Yürürlükteki Mavi Yasalar (Hedef: 5)"
-            >
-              🔵 Mavi: {pub.blue_policies}/5
+            <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-neutral-500/20 opacity-80">
+              {pub.version || APP_VERSION}
             </span>
-            <span
-              className="px-2 py-0.5 rounded bg-red-600/30 border border-red-400/40 text-red-300"
-              title="Yürürlükteki Kırmızı Yasalar (Hedef: 6)"
-            >
-              🔴 Kırmızı: {pub.red_policies}/6
+            <span className="font-bold px-2 py-0.5 rounded bg-neutral-500/15">
+              Tur #{pub.round}
             </span>
-            <span
-              className="px-2 py-0.5 rounded bg-amber-600/25 border border-amber-400/30 text-amber-300"
-              title="Kaos Sayacı (3 olursa en üstteki kart zorla yasalaşır)"
-            >
-              ⚡ Kaos: {pub.chaos_counter}/3
+            <span className="font-bold px-2 py-0.5 rounded bg-amber-500/20 text-amber-500 border border-amber-500/40">
+              {translatePhase(pub.phase)}
             </span>
-            <span className="text-[11px] text-neutral-400 font-mono hidden md:inline">
-              🃏 Deste:{pub.deck_count} | Iskarta:{pub.discard_count}
-            </span>
-          </div>
-        </div>
-
-        {/* Sağ: Kamera Açısı Seçici, Gizli Kimlik Rozeti, Tema & Çıkış */}
-        <div className="pointer-events-auto flex flex-wrap items-center gap-2">
-          {/* Kamera Kontrol Butonları */}
-          <div className="flex items-center bg-black/80 backdrop-blur-md border border-white/15 rounded-xl p-1 text-xs text-white shadow-xl">
-            <button
-              onClick={() => setCameraMode("auto")}
-              className={`px-2.5 py-1 rounded-lg font-bold transition cursor-pointer ${
-                cameraMode === "auto"
-                  ? "bg-amber-500 text-black"
-                  : "text-neutral-300 hover:bg-white/10"
-              }`}
-              title="Kart çekilirken otomatik olarak masaya yaklaşır"
-            >
-              🎥 Otomatik
-            </button>
-            <button
-              onClick={() => setCameraMode("table")}
-              className={`px-2.5 py-1 rounded-lg font-bold transition cursor-pointer ${
-                cameraMode === "table"
-                  ? "bg-amber-500 text-black"
-                  : "text-neutral-300 hover:bg-white/10"
-              }`}
-              title="Kamerayı masadaki kartlara odakla"
-            >
-              🃏 Masa
-            </button>
-            <button
-              onClick={() => setCameraMode("characters")}
-              className={`px-2.5 py-1 rounded-lg font-bold transition cursor-pointer ${
-                cameraMode === "characters"
-                  ? "bg-amber-500 text-black"
-                  : "text-neutral-300 hover:bg-white/10"
-              }`}
-              title="Kamerayı masadaki karakterlere odakla"
-            >
-              👥 Karakterler
-            </button>
-          </div>
-
-          {/* Gizli Kimlik Rozeti (Tıkla veya Üzerine Gel) */}
-          <div className="relative">
-            <button
-              onClick={() => setShowRoleSecret((prev) => !prev)}
-              className="bg-black/80 backdrop-blur-md border border-white/20 px-3 py-1.5 rounded-xl text-xs font-bold text-white flex items-center gap-1.5 shadow-xl cursor-pointer hover:border-amber-400"
-            >
-              <span>🕵️ Kimliğin:</span>
+            {pub.phase !== "GAME_OVER" && (
               <span
-                className={
-                  showRoleSecret
-                    ? view.your_role === "PROTECTOR"
-                      ? "text-blue-400 font-black"
-                      : "text-red-400 font-black"
-                    : "blur-[4px] select-none"
-                }
+                className={`font-mono font-extrabold px-2 py-0.5 rounded ${
+                  phaseTimer <= 3
+                    ? "bg-red-600 text-white animate-pulse"
+                    : isDark
+                    ? "bg-white/10 text-amber-300"
+                    : "bg-neutral-200 text-amber-700"
+                }`}
               >
-                {translateRole(view.your_role)}
+                ⏱ {phaseTimer}s
               </span>
-              <span className="text-[10px] text-neutral-400">
-                ({showRoleSecret ? "Gizle" : "Göster"})
-              </span>
-            </button>
-
-            {showRoleSecret && (
-              <div className="absolute right-0 mt-2 w-64 bg-black/95 border border-white/20 rounded-xl p-3 text-xs text-white shadow-2xl z-30">
-                <div className="font-bold mb-1 text-amber-400">
-                  Rolün: {translateRole(view.your_role)}
-                </div>
-                <p className="text-neutral-300 leading-relaxed">
-                  {view.your_role === "PROTECTOR" &&
-                    "5 Mavi Yasa çıkar veya Gizli Lideri tespit edip infaz et."}
-                  {view.your_role === "SPY" &&
-                    "Gizli Lideri koru ve 6 Kırmızı Yasa çıkarılmasına yardım et."}
-                  {view.your_role === "SECRET_LEADER" &&
-                    "Koruyucu gibi davran! 3 Kırmızı Yasadan sonra Ortak seçilirsen anında kazanırsın."}
-                </p>
-                {(view.your_role === "SPY" ||
-                  view.your_role === "SECRET_LEADER") && (
-                  <div className="mt-2 pt-2 border-t border-white/10 text-[11px] space-y-1">
-                    {view.secret_leader_id && (
-                      <div>
-                        Gizli Lider:{" "}
-                        <strong className="text-purple-400">
-                          {
-                            pub.players.find(
-                              (p) => p.id === view.secret_leader_id
-                            )?.name
-                          }
-                        </strong>
-                      </div>
-                    )}
-                    {view.known_allies?.length > 0 && (
-                      <div>
-                        Casus Ortağın:{" "}
-                        <strong className="text-red-400">
-                          {view.known_allies
-                            .map(
-                              (id) =>
-                                pub.players.find((p) => p.id === id)?.name
-                            )
-                            .join(", ")}
-                        </strong>
-                      </div>
-                    )}
-                  </div>
-                )}
-              </div>
             )}
+
+            <div className="h-3.5 w-[1px] bg-neutral-500/30 mx-0.5 hidden sm:block" />
+
+            <div className="flex items-center gap-1 font-bold">
+              <span className="px-1.5 py-0.5 rounded bg-blue-600/20 border border-blue-500/40 text-blue-500">
+                🔵 {pub.blue_policies}/5
+              </span>
+              <span className="px-1.5 py-0.5 rounded bg-red-600/20 border border-red-500/40 text-red-500">
+                🔴 {pub.red_policies}/6
+              </span>
+              <span className="px-1.5 py-0.5 rounded bg-amber-500/20 border border-amber-500/40 text-amber-500">
+                ⚡ Kaos: {pub.chaos_counter}/3
+              </span>
+              <span className="text-[10px] opacity-70 font-mono hidden xl:inline ml-1">
+                Deste:{pub.deck_count} | Iskarta:{pub.discard_count}
+              </span>
+            </div>
           </div>
 
-          <button
-            onClick={toggleTheme}
-            className="bg-black/80 backdrop-blur-md border border-white/15 px-2.5 py-1.5 rounded-xl text-xs font-bold text-white cursor-pointer hover:bg-white/10"
-            title="Tema Değiştir"
-          >
-            {theme === "dark" ? "☀️" : "🌙"}
-          </button>
+          {/* Sağ: Kamera Açıları, Gizli Kimlik, Tema & Lobi */}
+          <div className="pointer-events-auto flex flex-wrap items-center gap-1.5">
+            <div
+              className={`flex items-center backdrop-blur-md border rounded-xl p-0.5 text-[11px] shadow-xl ${hudCardClass}`}
+            >
+              <button
+                onClick={() => setCameraMode("auto")}
+                className={`px-2 py-1 rounded-lg font-bold transition cursor-pointer ${
+                  cameraMode === "auto"
+                    ? "bg-amber-500 text-black"
+                    : "hover:bg-neutral-500/20 opacity-80"
+                }`}
+                title="Kart çekilirken otomatik olarak masaya yaklaşır"
+              >
+                🎥 Oto
+              </button>
+              <button
+                onClick={() => setCameraMode("table")}
+                className={`px-2 py-1 rounded-lg font-bold transition cursor-pointer ${
+                  cameraMode === "table"
+                    ? "bg-amber-500 text-black"
+                    : "hover:bg-neutral-500/20 opacity-80"
+                }`}
+                title="Masadaki kartlara odaklan"
+              >
+                🃏 Masa
+              </button>
+              <button
+                onClick={() => setCameraMode("characters")}
+                className={`px-2 py-1 rounded-lg font-bold transition cursor-pointer ${
+                  cameraMode === "characters"
+                    ? "bg-amber-500 text-black"
+                    : "hover:bg-neutral-500/20 opacity-80"
+                }`}
+                title="Masadaki karakterlere odaklan"
+              >
+                👥 Masaüstü
+              </button>
+            </div>
 
-          <button
-            onClick={leaveTable}
-            className="bg-black/80 backdrop-blur-md border border-red-500/40 px-3 py-1.5 rounded-xl text-xs font-bold text-red-400 cursor-pointer hover:bg-red-500/20"
-          >
-            Çıkış
-          </button>
-        </div>
-      </header>
+            <div className="relative">
+              <button
+                onClick={() => setShowRoleSecret((prev) => !prev)}
+                className={`backdrop-blur-md border px-2.5 py-1.5 rounded-xl text-[11px] font-bold flex items-center gap-1 shadow-xl cursor-pointer hover:border-amber-500 ${hudCardClass}`}
+              >
+                <span>🕵️ Rol:</span>
+                <span
+                  className={
+                    showRoleSecret
+                      ? view.your_role === "PROTECTOR"
+                        ? "text-blue-500 font-black"
+                        : "text-red-500 font-black"
+                      : "blur-[4px] select-none"
+                  }
+                >
+                  {translateRole(view.your_role)}
+                </span>
+                <span className="text-[10px] opacity-60">
+                  ({showRoleSecret ? "Gizle" : "Aç"})
+                </span>
+              </button>
 
-      {/* 3. SAĞ ALT BİRLEŞİK KUMANDA, MİMİK, İŞARET ETME VE MASA KAYITLARI PANELİ */}
+              {showRoleSecret && (
+                <div
+                  className={`absolute right-0 mt-2 w-64 border rounded-xl p-3 text-xs shadow-2xl z-30 ${hudCardClass}`}
+                >
+                  <div className="font-bold mb-1 text-amber-500">
+                    Rolün: {translateRole(view.your_role)}
+                  </div>
+                  <p className="opacity-85 leading-relaxed">
+                    {view.your_role === "PROTECTOR" &&
+                      "5 Mavi Yasa çıkar veya Gizli Lideri tespit edip infaz et."}
+                    {view.your_role === "SPY" &&
+                      "Gizli Lideri koru ve 6 Kırmızı Yasa çıkarılmasına yardım et."}
+                    {view.your_role === "SECRET_LEADER" &&
+                      "Koruyucu gibi davran! 3 Kırmızı Yasadan sonra Ortak seçilirsen anında kazanırsın."}
+                  </p>
+                  {(view.your_role === "SPY" ||
+                    view.your_role === "SECRET_LEADER") && (
+                    <div className="mt-2 pt-2 border-t border-neutral-500/20 text-[11px] space-y-1">
+                      {view.secret_leader_id && (
+                        <div>
+                          Gizli Lider:{" "}
+                          <strong className="text-purple-500">
+                            {
+                              pub.players.find(
+                                (p) => p.id === view.secret_leader_id
+                              )?.name
+                            }
+                          </strong>
+                        </div>
+                      )}
+                      {view.known_allies?.length > 0 && (
+                        <div>
+                          Casus Ortağın:{" "}
+                          <strong className="text-red-500">
+                            {view.known_allies
+                              .map(
+                                (id) =>
+                                  pub.players.find((p) => p.id === id)?.name
+                              )
+                              .join(", ")}
+                          </strong>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+
+            <button
+              onClick={toggleTheme}
+              className={`backdrop-blur-md border px-2.5 py-1.5 rounded-xl text-[11px] font-bold cursor-pointer hover:border-amber-500 ${hudCardClass}`}
+              title={isDark ? "Beyaz Temaya Geç" : "Siyah Temaya Geç"}
+            >
+              {isDark ? "☀️" : "🌙"}
+            </button>
+
+            <button
+              onClick={() => sendAction("return_lobby")}
+              className={`backdrop-blur-md border border-red-500/40 px-2.5 py-1.5 rounded-xl text-[11px] font-bold text-red-500 cursor-pointer hover:bg-red-500/15 ${hudCardClass}`}
+            >
+              Menü
+            </button>
+          </div>
+        </header>
+
+        {/* Masa / Kart Odak Bilgi Şeridi (Sadece kart aşaması veya Masa kamerasında açılır) */}
+        {(cameraMode === "table" ||
+          (cameraMode === "auto" &&
+            (pub.phase === "LEGISLATE_LEADER" ||
+              pub.phase === "LEGISLATE_PARTNER" ||
+              pub.phase === "POWERS_PEEK"))) && (
+          <div
+            className={`px-3.5 py-1 rounded-full text-[11px] font-bold shadow-lg border backdrop-blur-md ${hudCardClass} border-amber-500/50`}
+          >
+            <span className="text-amber-500">🃏 MASA KART ODAĞI:</span>{" "}
+            <span className="font-normal opacity-90">
+              {pub.phase === "LEGISLATE_LEADER"
+                ? isLeader
+                  ? "Masadaki 3 karttan ıskartaya atmak istediğine tıkla!"
+                  : "Lider masadaki 3 karttan 1'ini eliyor..."
+                : pub.phase === "LEGISLATE_PARTNER"
+                ? isPartner
+                  ? "Masadaki 2 karttan yürürlüğe koymak istediğine tıkla!"
+                  : "Ortak masadaki 2 karttan 1'ini seçiyor..."
+                : "Masadaki yasa kartları inceleniyor"}
+            </span>
+          </div>
+        )}
+      </div>
+
+      {/* 3. SAĞ ALT BİRLEŞİK KUMANDA, MİMİK, PARMAKLA İŞARET VE KAYIT PANELİ */}
       <aside
-        className={`pointer-events-auto fixed bottom-3 right-3 z-30 w-[calc(100vw-1.5rem)] sm:w-[430px] md:w-[460px] bg-black/88 backdrop-blur-xl border border-white/20 rounded-2xl text-white shadow-2xl flex flex-col transition-all duration-200 ${
-          hudMinimized ? "max-h-14" : "max-h-[82vh]"
+        className={`pointer-events-auto fixed bottom-3 right-3 z-30 w-[calc(100vw-1.5rem)] sm:w-[390px] backdrop-blur-xl border rounded-2xl shadow-2xl flex flex-col transition-all duration-200 ${hudCardClass} ${
+          hudMinimized ? "max-h-12" : "max-h-[76vh]"
         }`}
       >
-        {/* Panel Üst Başlık ve Sekmeler */}
-        <div className="flex items-center justify-between px-3.5 py-2.5 border-b border-white/15 shrink-0">
+        {/* Sekme Çubuğu */}
+        <div className="flex items-center justify-between px-3.5 py-2.5 border-b border-neutral-500/20 shrink-0">
           <div className="flex items-center gap-1.5">
             <button
               onClick={() => {
@@ -560,7 +651,7 @@ export default function App() {
               className={`px-2.5 py-1 rounded-lg text-xs font-bold transition cursor-pointer ${
                 hudTab === "controls" && !hudMinimized
                   ? "bg-amber-500 text-black"
-                  : "text-neutral-300 hover:bg-white/10"
+                  : "hover:bg-neutral-500/20 opacity-85"
               }`}
             >
               🎭 Karar & Mimik
@@ -573,11 +664,11 @@ export default function App() {
               className={`px-2.5 py-1 rounded-lg text-xs font-bold transition cursor-pointer flex items-center gap-1 ${
                 hudTab === "logs" && !hudMinimized
                   ? "bg-amber-500 text-black"
-                  : "text-neutral-300 hover:bg-white/10"
+                  : "hover:bg-neutral-500/20 opacity-85"
               }`}
             >
               <span>📋 Kayıtlar</span>
-              <span className="text-[10px] px-1 rounded bg-white/20">
+              <span className="text-[10px] px-1 rounded bg-neutral-500/25">
                 {pub.logs?.length || 0}
               </span>
             </button>
@@ -589,7 +680,7 @@ export default function App() {
               className={`px-2.5 py-1 rounded-lg text-xs font-bold transition cursor-pointer ${
                 hudTab === "history" && !hudMinimized
                   ? "bg-amber-500 text-black"
-                  : "text-neutral-300 hover:bg-white/10"
+                  : "hover:bg-neutral-500/20 opacity-85"
               }`}
             >
               🗳️ Oylar ({pub.history?.length || 0})
@@ -598,8 +689,7 @@ export default function App() {
 
           <button
             onClick={() => setHudMinimized((prev) => !prev)}
-            className="px-2 py-1 rounded-lg text-xs font-bold text-neutral-300 hover:bg-white/10 cursor-pointer"
-            title={hudMinimized ? "Paneli Aç" : "Paneli Küçült"}
+            className="px-2 py-1 rounded-lg text-xs font-bold hover:bg-neutral-500/20 opacity-85 cursor-pointer"
           >
             {hudMinimized ? "▲ Aç" : "▼ Küçült"}
           </button>
@@ -607,30 +697,30 @@ export default function App() {
 
         {/* Panel İçeriği */}
         {!hudMinimized && (
-          <div className="p-3.5 overflow-y-auto space-y-3.5 text-xs">
+          <div className="p-3.5 overflow-y-auto space-y-3 text-xs">
             {hudTab === "controls" && (
               <>
-                {/* BÖLÜM A: AKTİF OYUN AŞAMASI KARAR ALANI */}
-                <div className="p-3 rounded-xl bg-white/5 border border-white/10 space-y-2.5">
+                {/* BÖLÜM A: AKTİF FAZ KARARI */}
+                <div className={`p-3 rounded-xl border space-y-2.5 ${subBoxClass}`}>
                   <div className="flex items-center justify-between">
-                    <span className="font-black uppercase tracking-wider text-amber-400">
+                    <span className="font-black uppercase tracking-wider text-amber-500">
                       ⚡ {translatePhase(pub.phase)}
                     </span>
                     {pub.phase !== "GAME_OVER" && (
-                      <span className="font-mono text-[11px] text-neutral-300">
+                      <span className="font-mono text-[11px] opacity-80">
                         Kalan: <strong>{phaseTimer} sn</strong>
                       </span>
                     )}
                   </div>
 
-                  {/* 1. ORTAK ADAYI SEÇİMİ */}
+                  {/* 1. ORTAK SEÇİMİ */}
                   {pub.phase === "NOMINATION" && (
                     <div>
                       {isLeader ? (
                         <div className="space-y-2">
-                          <p className="text-neutral-300">
-                            Masার Lideri sensin! Yasaları birlikte çıkarmak için
-                            bir <strong>Ortak (Partner)</strong> seç:
+                          <p className="opacity-85">
+                            Lider sensin! Yasaları birlikte çıkarmak için bir{" "}
+                            <strong>Ortak (Partner)</strong> seç:
                           </p>
                           <div className="grid grid-cols-2 gap-1.5">
                             {otherPlayers
@@ -642,12 +732,9 @@ export default function App() {
                                   key={p.id}
                                   onClick={() => {
                                     setSelectedTargetId(p.id);
-                                    sendGesture(
-                                      "pointing",
-                                      `👉 Adayım ${p.name}!`,
-                                      p.id
-                                    );
-                                    sendAction("NOMINATE", { target_id: p.id });
+                                    sendAction("nominate", {
+                                      candidate_id: p.id,
+                                    });
                                   }}
                                   className="px-3 py-2 rounded-lg bg-amber-500 hover:bg-amber-400 text-black font-bold transition cursor-pointer text-left flex items-center justify-between"
                                 >
@@ -658,15 +745,15 @@ export default function App() {
                           </div>
                         </div>
                       ) : (
-                        <p className="text-neutral-300">
+                        <p className="opacity-85">
                           Lider{" "}
-                          <strong className="text-amber-300">
+                          <strong className="text-amber-500">
                             {
                               pub.players.find((p) => p.id === pub.leader_id)
                                 ?.name
                             }
                           </strong>{" "}
-                          masadan bir Ortak adayı düşünüyor...
+                          masadan bir Ortak adayı seçiyor...
                         </p>
                       )}
                     </div>
@@ -675,16 +762,16 @@ export default function App() {
                   {/* 2. HÜKÜMET OYLAMASI */}
                   {pub.phase === "VOTING" && (
                     <div className="space-y-2">
-                      <p className="text-neutral-200">
+                      <p className="opacity-90">
                         Lider{" "}
-                        <strong className="text-amber-300">
+                        <strong className="text-amber-500">
                           {
                             pub.players.find((p) => p.id === pub.leader_id)
                               ?.name
                           }
                         </strong>{" "}
                         & Ortak Adayı{" "}
-                        <strong className="text-emerald-300">
+                        <strong className="text-emerald-500">
                           {
                             pub.players.find((p) => p.id === pub.partner_id)
                               ?.name
@@ -693,23 +780,23 @@ export default function App() {
                         hükümetini onaylıyor musun?
                       </p>
                       {!me?.is_alive ? (
-                        <div className="text-red-400 font-bold">
+                        <div className="text-red-500 font-bold">
                           İnfaz edildiğin için oy kullanamazsın.
                         </div>
-                      ) : pub.votes[view.your_id] ? (
-                        <div className="p-2 rounded-lg bg-amber-500/20 text-amber-300 font-bold text-center">
-                          Oyun kaydedildi. Diğer oyuncular bekleniyor...
+                      ) : pub.votes[yourId] ? (
+                        <div className="p-2 rounded-lg bg-amber-500/20 text-amber-500 font-bold text-center">
+                          ✓ Oyun masaya bırakıldı. Diğer oyuncular bekleniyor...
                         </div>
                       ) : (
                         <div className="grid grid-cols-2 gap-2">
                           <button
-                            onClick={() => sendAction("VOTE", { vote: "YES" })}
+                            onClick={() => sendAction("vote", { vote: "YES" })}
                             className="py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-black transition cursor-pointer shadow"
                           >
                             ✓ EVET (JA)
                           </button>
                           <button
-                            onClick={() => sendAction("VOTE", { vote: "NO" })}
+                            onClick={() => sendAction("vote", { vote: "NO" })}
                             className="py-2.5 rounded-xl bg-red-600 hover:bg-red-500 text-white font-black transition cursor-pointer shadow"
                           >
                             ✕ HAYIR (NEIN)
@@ -719,35 +806,35 @@ export default function App() {
                     </div>
                   )}
 
-                  {/* 3. LİDER YASA ELEMESİ (MASADAKİ 3 KART) */}
+                  {/* 3. LİDER KART ELEMESİ */}
                   {pub.phase === "LEGISLATE_LEADER" && (
                     <div>
-                      {isLeader && view.drawn_policies ? (
+                      {isLeader && view.drawn_policies?.length > 0 ? (
                         <div className="space-y-2">
-                          <p className="text-neutral-200">
-                            Masadaki desteden 3 yasa çektin.{" "}
-                            <strong className="text-amber-300">
-                              1 tanesini ıskartaya çıkarmak için tıkla
+                          <p className="opacity-90">
+                            Masadan 3 kart çektin.{" "}
+                            <strong className="text-amber-500">
+                              Iskartaya atmak istediğin 1 kartı seç
                             </strong>{" "}
-                            (kalan 2 kart Ortağa gidecek):
+                            (panelden veya doğrudan 3D masadaki karta tıkla):
                           </p>
                           <div className="grid grid-cols-3 gap-2">
                             {view.drawn_policies.map((pol, idx) => (
                               <button
                                 key={idx}
                                 onClick={() =>
-                                  sendAction("LEADER_DISCARD", { index: idx })
+                                  sendAction("leader_discard", { index: idx })
                                 }
-                                className={`p-3 rounded-xl border-2 flex flex-col items-center justify-center gap-1 font-black transition hover:-translate-y-0.5 cursor-pointer ${
+                                className={`p-2.5 rounded-xl border-2 flex flex-col items-center justify-center gap-1 font-black transition hover:-translate-y-0.5 cursor-pointer text-white ${
                                   pol === "BLUE"
-                                    ? "bg-blue-950/90 border-blue-400 text-blue-200"
-                                    : "bg-red-950/90 border-red-400 text-red-200"
+                                    ? "bg-blue-700 border-blue-400"
+                                    : "bg-red-700 border-red-400"
                                 }`}
                               >
-                                <span className="text-base">
+                                <span className="text-sm">
                                   {pol === "BLUE" ? "🔵 MAVİ" : "🔴 KIRMIZI"}
                                 </span>
-                                <span className="text-[10px] px-1.5 py-0.5 rounded bg-black/50 text-white">
+                                <span className="text-[10px] px-1.5 py-0.5 rounded bg-black/50">
                                   🗑️ Çöpe At
                                 </span>
                               </button>
@@ -755,30 +842,29 @@ export default function App() {
                           </div>
                         </div>
                       ) : (
-                        <p className="text-neutral-300">
+                        <p className="opacity-85">
                           🃏 Kamera masaya odaklandı: Lider{" "}
-                          <strong className="text-amber-300">
+                          <strong className="text-amber-500">
                             {
                               pub.players.find((p) => p.id === pub.leader_id)
                                 ?.name
                             }
                           </strong>{" "}
-                          masadaki 3 gizli yasa kartından birini ıskartaya
-                          ayırıyor...
+                          masadaki 3 gizli karttan 1'ini eliyor...
                         </p>
                       )}
                     </div>
                   )}
 
-                  {/* 4. ORTAK YASA YÜRÜRLÜĞÜ (MASADAKİ 2 KART) */}
+                  {/* 4. ORTAK YASA YÜRÜRLÜĞÜ */}
                   {pub.phase === "LEGISLATE_PARTNER" && (
                     <div>
-                      {isPartner && view.drawn_policies ? (
+                      {isPartner && view.drawn_policies?.length > 0 ? (
                         <div className="space-y-2">
-                          <p className="text-neutral-200">
-                            Lider masadan sana 2 yasa kartı uzattı.{" "}
-                            <strong className="text-emerald-300">
-                              Yürürlüğe koymak istediğin yasayı seç:
+                          <p className="opacity-90">
+                            Lider masadan sana 2 yasa kartı verdi.{" "}
+                            <strong className="text-emerald-500">
+                              Yürürlüğe koymak istediğin kartı seç:
                             </strong>
                           </p>
                           <div className="grid grid-cols-2 gap-2">
@@ -786,18 +872,18 @@ export default function App() {
                               <button
                                 key={idx}
                                 onClick={() =>
-                                  sendAction("PARTNER_ENACT", { index: idx })
+                                  sendAction("partner_enact", { index: idx })
                                 }
-                                className={`p-3 rounded-xl border-2 flex flex-col items-center justify-center gap-1 font-black transition hover:-translate-y-0.5 cursor-pointer ${
+                                className={`p-2.5 rounded-xl border-2 flex flex-col items-center justify-center gap-1 font-black transition hover:-translate-y-0.5 cursor-pointer text-white ${
                                   pol === "BLUE"
-                                    ? "bg-blue-950/90 border-blue-400 text-blue-200"
-                                    : "bg-red-950/90 border-red-400 text-red-200"
+                                    ? "bg-blue-700 border-blue-400"
+                                    : "bg-red-700 border-red-400"
                                 }`}
                               >
-                                <span className="text-base">
+                                <span className="text-sm">
                                   {pol === "BLUE" ? "🔵 MAVİ" : "🔴 KIRMIZI"}
                                 </span>
-                                <span className="text-[10px] px-2 py-0.5 rounded bg-black/50 text-white">
+                                <span className="text-[10px] px-2 py-0.5 rounded bg-black/50">
                                   ✓ Yürürlüğe Koy
                                 </span>
                               </button>
@@ -805,30 +891,30 @@ export default function App() {
                           </div>
                         </div>
                       ) : (
-                        <p className="text-neutral-300">
+                        <p className="opacity-85">
                           🃏 Kamera masaya odaklandı: Ortak{" "}
-                          <strong className="text-emerald-300">
+                          <strong className="text-emerald-500">
                             {
                               pub.players.find((p) => p.id === pub.partner_id)
                                 ?.name
                             }
                           </strong>{" "}
-                          masadaki 2 yasa kartından birini yürürlüğe koyuyor...
+                          masadaki 2 karttan 1'ini seçiyor...
                         </p>
                       )}
                     </div>
                   )}
 
-                  {/* 5. YAPILANDIRILMIŞ BEYAN & ÇELİŞKİ KONTROLÜ */}
+                  {/* 5. İDDİA & ÇELİŞKİ KONTROLÜ */}
                   {pub.phase === "CLAIMING" && pub.current_claim && (
                     <div className="space-y-2">
                       <div className="flex items-center justify-between">
-                        <span>Yürürlüğe Giren Yasa:</span>
+                        <span>Masaya Koyulan Yasa:</span>
                         <span
-                          className={`px-2 py-0.5 rounded font-black ${
+                          className={`px-2 py-0.5 rounded font-black text-white ${
                             pub.current_claim.partner_enacted === "BLUE"
-                              ? "bg-blue-600 text-white"
-                              : "bg-red-600 text-white"
+                              ? "bg-blue-600"
+                              : "bg-red-600"
                           }`}
                         >
                           {pub.current_claim.partner_enacted === "BLUE"
@@ -838,13 +924,17 @@ export default function App() {
                       </div>
 
                       {isLeader && !pub.current_claim.leader_claimed && (
-                        <div className="p-2.5 rounded-lg bg-black/50 border border-white/15 space-y-2">
-                          <div className="font-bold text-amber-300">
-                            Lider Beyanı Ver (Gerçek veya Blöf):
+                        <div className="p-2.5 rounded-lg bg-amber-500/10 border border-amber-500/30 space-y-2">
+                          <div className="font-bold text-amber-500">
+                            Lider Beyanını Ver (Gerçek veya Blöf):
                           </div>
                           <div className="grid grid-cols-2 gap-1.5">
                             <select
-                              className="bg-neutral-900 border border-white/20 rounded p-1.5 text-xs"
+                              className={`border rounded p-1.5 text-xs ${
+                                isDark
+                                  ? "bg-neutral-900 border-white/20 text-white"
+                                  : "bg-white border-neutral-300 text-neutral-900"
+                              }`}
                               onChange={(e) =>
                                 setLeaderDrawnClaim(e.target.value.split(","))
                               }
@@ -864,7 +954,11 @@ export default function App() {
                               </option>
                             </select>
                             <select
-                              className="bg-neutral-900 border border-white/20 rounded p-1.5 text-xs"
+                              className={`border rounded p-1.5 text-xs ${
+                                isDark
+                                  ? "bg-neutral-900 border-white/20 text-white"
+                                  : "bg-white border-neutral-300 text-neutral-900"
+                              }`}
                               onChange={(e) =>
                                 setLeaderPassedClaim(e.target.value.split(","))
                               }
@@ -883,7 +977,7 @@ export default function App() {
                           </div>
                           <button
                             onClick={() =>
-                              sendAction("CLAIM_LEADER", {
+                              sendAction("leader_claim", {
                                 drawn: leaderDrawnClaim,
                                 passed: leaderPassedClaim,
                               })
@@ -896,12 +990,16 @@ export default function App() {
                       )}
 
                       {isPartner && !pub.current_claim.partner_claimed && (
-                        <div className="p-2.5 rounded-lg bg-black/50 border border-white/15 space-y-2">
-                          <div className="font-bold text-emerald-300">
+                        <div className="p-2.5 rounded-lg bg-emerald-500/10 border border-emerald-500/30 space-y-2">
+                          <div className="font-bold text-emerald-500">
                             Ortak Beyanı (Liderden Sana Ne Geldi?):
                           </div>
                           <select
-                            className="w-full bg-neutral-900 border border-white/20 rounded p-1.5 text-xs"
+                            className={`w-full border rounded p-1.5 text-xs ${
+                              isDark
+                                ? "bg-neutral-900 border-white/20 text-white"
+                                : "bg-white border-neutral-300 text-neutral-900"
+                            }`}
                             onChange={(e) =>
                               setPartnerReceivedClaim(e.target.value.split(","))
                             }
@@ -915,7 +1013,7 @@ export default function App() {
                           </select>
                           <button
                             onClick={() =>
-                              sendAction("CLAIM_PARTNER", {
+                              sendAction("partner_claim", {
                                 received: partnerReceivedClaim,
                               })
                             }
@@ -926,31 +1024,35 @@ export default function App() {
                         </div>
                       )}
 
+                      {!isLeader && !isPartner && (
+                        <p className="opacity-80">
+                          Lider ve Ortak masaya kart beyanlarını sunuyor...
+                        </p>
+                      )}
+
                       {pub.current_claim.has_conflict && (
-                        <div className="p-2 rounded-lg bg-red-600/30 border border-red-500 text-red-200 font-bold animate-pulse">
+                        <div className="p-2.5 rounded-lg bg-red-600 text-white font-bold stamp-conflict">
                           ⚡ {pub.current_claim.conflict_note}
                         </div>
                       )}
                     </div>
                   )}
 
-                  {/* 6. LİDER YETKİSİ: DESTEYE GÖZ ATMA (PEEK) */}
+                  {/* 6. LİDER YETKİSİ: DESTEYE GÖZ ATMA */}
                   {pub.phase === "POWERS_PEEK" && (
                     <div>
-                      {isLeader && view.peeked_policies ? (
+                      {isLeader && view.peeked_policies?.length > 0 ? (
                         <div className="space-y-2">
-                          <p className="text-neutral-200">
-                            3. Kırmızı Yasa Yetkisi: Masadaki destenin en üstündeki
-                            3 kart:
+                          <p className="opacity-90">
+                            3. Kırmızı Yasa Yetkisi — Masadaki destenin en
+                            üstündeki 3 kart:
                           </p>
                           <div className="flex gap-2">
                             {view.peeked_policies.map((pol, i) => (
                               <span
                                 key={i}
-                                className={`px-3 py-1.5 rounded-lg font-black ${
-                                  pol === "BLUE"
-                                    ? "bg-blue-600 text-white"
-                                    : "bg-red-600 text-white"
+                                className={`px-3 py-1.5 rounded-lg font-black text-white ${
+                                  pol === "BLUE" ? "bg-blue-600" : "bg-red-600"
                                 }`}
                               >
                                 #{i + 1}: {pol === "BLUE" ? "MAVİ" : "KIRMIZI"}
@@ -958,15 +1060,15 @@ export default function App() {
                             ))}
                           </div>
                           <button
-                            onClick={() => sendAction("CLOSE_PEEK")}
+                            onClick={() => sendAction("close_peek")}
                             className="w-full py-2 rounded-lg bg-amber-500 text-black font-black cursor-pointer"
                           >
                             İncelemeyi Bitir
                           </button>
                         </div>
                       ) : (
-                        <p className="text-neutral-300">
-                          Lider destenin üstündeki 3 kartı gizlice inceliyor...
+                        <p className="opacity-85">
+                          Lider destenin üstündeki 3 kartı inceliyor...
                         </p>
                       )}
                     </div>
@@ -977,9 +1079,8 @@ export default function App() {
                     <div>
                       {isLeader ? (
                         <div className="space-y-2">
-                          <p className="text-red-300 font-bold">
-                            ⚖️ İnfaz Yetkisi: Masadan bir oyuncuyu kalıcı olarak
-                            infaz et!
+                          <p className="text-red-500 font-bold">
+                            ⚖️ İnfaz Yetkisi: Masadan bir oyuncuyu infaz et!
                           </p>
                           <div className="grid grid-cols-2 gap-1.5">
                             {otherPlayers
@@ -993,7 +1094,9 @@ export default function App() {
                                       `👉 İnfaz: ${p.name}!`,
                                       p.id
                                     );
-                                    sendAction("EXECUTE", { target_id: p.id });
+                                    sendAction("execute_player", {
+                                      target_id: p.id,
+                                    });
                                   }}
                                   className="px-3 py-2 rounded-lg bg-red-600 hover:bg-red-500 text-white font-black cursor-pointer"
                                 >
@@ -1003,7 +1106,7 @@ export default function App() {
                           </div>
                         </div>
                       ) : (
-                        <p className="text-red-300 font-bold">
+                        <p className="text-red-500 font-bold">
                           ⚖️ Lider{" "}
                           {
                             pub.players.find((p) => p.id === pub.leader_id)
@@ -1015,21 +1118,24 @@ export default function App() {
                     </div>
                   )}
 
-                  {/* 8. ŞÜPHE İŞARETLEME & SONRAKİ TUR */}
+                  {/* 8. ŞÜPHE, ÇELİŞKİ İNCELEME & İŞARET ETME */}
                   {pub.phase === "SUSPICION_MARKING" && (
                     <div className="space-y-2">
-                      {pub.current_claim?.has_conflict && (
-                        <div className="p-2 rounded-lg bg-red-600/30 border border-red-500 text-red-200 font-bold">
+                      {pub.current_claim?.has_conflict ? (
+                        <div className="p-2 rounded-lg bg-red-600 text-white font-bold stamp-conflict">
                           ⚡ {pub.current_claim.conflict_note}
                         </div>
-                      )}
+                      ) : pub.current_claim ? (
+                        <div className="p-1.5 rounded-lg bg-emerald-500/15 border border-emerald-500/30 text-emerald-500 font-semibold">
+                          ✓ {pub.current_claim.conflict_note}
+                        </div>
+                      ) : null}
                       <div className="flex items-center justify-between gap-2">
-                        <span className="text-neutral-300">
-                          Aşağıdan bir oyuncuyu parmakla işaret edebilir veya
-                          şüphe çipi bırakabilirsin.
+                        <span className="opacity-85">
+                          Hedef seçip 3D parmağınla işaret et veya çip bırak.
                         </span>
                         <button
-                          onClick={() => sendAction("NEXT_ROUND")}
+                          onClick={() => sendAction("finish_marking")}
                           className="shrink-0 px-3 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-400 text-black font-black cursor-pointer"
                         >
                           Sonraki Tur →
@@ -1044,17 +1150,17 @@ export default function App() {
                       <div
                         className={`text-base font-black ${
                           pub.winner === "PROTECTORS"
-                            ? "text-blue-400"
-                            : "text-red-400"
+                            ? "text-blue-500"
+                            : "text-red-500"
                         }`}
                       >
                         {pub.winner === "PROTECTORS"
                           ? "🏆 KORUYUCULAR KAZANDI!"
                           : "🔥 CASUSLAR VE GİZLİ LİDER KAZANDI!"}
                       </div>
-                      <p className="text-neutral-300">{pub.win_reason}</p>
+                      <p className="opacity-85">{pub.win_reason}</p>
                       <button
-                        onClick={() => sendAction("RESTART_GAME")}
+                        onClick={() => sendAction("start_game")}
                         className="w-full py-2.5 rounded-xl bg-amber-500 hover:bg-amber-400 text-black font-black cursor-pointer shadow-lg"
                       >
                         🔄 Yeni Oyun Başlat
@@ -1063,20 +1169,19 @@ export default function App() {
                   )}
                 </div>
 
-                {/* BÖLÜM B: HEDEF SEÇİMİ, 3D PARMAKLA İŞARET ETME & ŞÜPHE ÇİPLERİ */}
-                <div className="p-3 rounded-xl bg-white/5 border border-white/10 space-y-2.5">
+                {/* BÖLÜM B: HEDEF SEÇİMİ, GERÇEK 3D PARMAKLA İŞARET & ÇİPLER */}
+                <div className={`p-3 rounded-xl border space-y-2 ${subBoxClass}`}>
                   <div className="flex items-center justify-between">
-                    <span className="font-bold uppercase tracking-wider text-neutral-300">
-                      🫵 Hedef Kişi Seç & Parmakla Göster
+                    <span className="font-bold uppercase tracking-wider opacity-75">
+                      🫵 Parmakla İşaret Et & Şüphe Çipi
                     </span>
                     {selectedTargetObj && (
-                      <span className="text-[11px] text-amber-400 font-bold">
-                        Seçili: {selectedTargetObj.name}
+                      <span className="text-[11px] text-amber-500 font-bold">
+                        Hedef: {selectedTargetObj.name}
                       </span>
                     )}
                   </div>
 
-                  {/* Oyuncu Seçim Butonları */}
                   <div className="flex flex-wrap gap-1.5">
                     {otherPlayers.map((p) => {
                       const isSel = selectedTargetId === p.id;
@@ -1091,21 +1196,24 @@ export default function App() {
                           disabled={!p.is_alive}
                           className={`px-2.5 py-1.5 rounded-lg font-bold transition cursor-pointer flex items-center gap-1 border ${
                             !p.is_alive
-                              ? "opacity-35 line-through border-white/10"
+                              ? "opacity-35 line-through border-neutral-500/20"
                               : isSel
                               ? "bg-amber-500 text-black border-amber-300 shadow"
-                              : "bg-white/10 text-white border-white/15 hover:bg-white/20"
+                              : isDark
+                              ? "bg-white/10 text-white border-white/15 hover:bg-white/20"
+                              : "bg-white text-neutral-900 border-neutral-300 hover:bg-neutral-200"
                           }`}
                         >
                           <span>🫵 {p.name}</span>
-                          {chip === "SUSPECT" && <span>🔴</span>}
+                          {(chip === "SUSPECT" || chip === "SUSPICIOUS") && (
+                            <span>🔴</span>
+                          )}
                           {chip === "TRUSTED" && <span>🟢</span>}
                         </button>
                       );
                     })}
                   </div>
 
-                  {/* Seçili Oyuncuya Hızlı İşaret Etme & Çip Koyma */}
                   {selectedTargetObj && (
                     <div className="grid grid-cols-3 gap-1.5 pt-1">
                       <button
@@ -1116,124 +1224,94 @@ export default function App() {
                             selectedTargetObj.id
                           )
                         }
-                        className="py-1.5 px-2 rounded-lg bg-amber-500/25 hover:bg-amber-500/40 border border-amber-400/50 text-amber-200 font-bold cursor-pointer"
+                        className="py-1.5 px-2 rounded-lg bg-amber-500/20 hover:bg-amber-500/35 border border-amber-500/50 text-amber-500 font-bold cursor-pointer"
                       >
-                        🫵 İşaret Et ({selectedTargetObj.name})
+                        🫵 İşaret Et
                       </button>
                       <button
                         onClick={() =>
-                          sendAction("SET_SUSPICION", {
+                          sendAction("toggle_suspicion", {
                             target_id: selectedTargetObj.id,
                             chip: "SUSPECT",
                           })
                         }
                         className={`py-1.5 px-2 rounded-lg font-bold cursor-pointer border ${
-                          mySuspicions[selectedTargetObj.id] === "SUSPECT"
-                            ? "bg-red-600 text-white border-red-300"
-                            : "bg-red-500/15 hover:bg-red-500/30 text-red-300 border-red-500/30"
+                          mySuspicions[selectedTargetObj.id] === "SUSPECT" ||
+                          mySuspicions[selectedTargetObj.id] === "SUSPICIOUS"
+                            ? "bg-red-600 text-white border-red-400"
+                            : "bg-red-500/15 hover:bg-red-500/30 text-red-500 border-red-500/30"
                         }`}
                       >
-                        🔴 Şüpheli Çipi
+                        🔴 Şüpheli
                       </button>
                       <button
                         onClick={() =>
-                          sendAction("SET_SUSPICION", {
+                          sendAction("toggle_suspicion", {
                             target_id: selectedTargetObj.id,
                             chip: "TRUSTED",
                           })
                         }
                         className={`py-1.5 px-2 rounded-lg font-bold cursor-pointer border ${
                           mySuspicions[selectedTargetObj.id] === "TRUSTED"
-                            ? "bg-emerald-600 text-white border-emerald-300"
-                            : "bg-emerald-500/15 hover:bg-emerald-500/30 text-emerald-300 border-emerald-500/30"
+                            ? "bg-emerald-600 text-white border-emerald-400"
+                            : "bg-emerald-500/15 hover:bg-emerald-500/30 text-emerald-500 border-emerald-500/30"
                         }`}
                       >
-                        🟢 Güven Çipi
+                        🟢 Güvenilir
                       </button>
                     </div>
                   )}
                 </div>
 
-                {/* BÖLÜM C: MİMİKLER VE SAĞA-SOLA BAKIŞ KONTROLLERİ */}
-                <div className="p-3 rounded-xl bg-white/5 border border-white/10 space-y-2">
+                {/* BÖLÜM C: MİMİKLER VE SAĞA-SOLA BAKIŞLAR */}
+                <div className={`p-3 rounded-xl border space-y-2 ${subBoxClass}`}>
                   <div className="flex items-center justify-between">
-                    <span className="font-bold uppercase tracking-wider text-neutral-300">
+                    <span className="font-bold uppercase tracking-wider opacity-75">
                       👀 Bakışlar & Mimik Tepkileri
                     </span>
                     {me?.bubble && (
-                      <span className="px-2 py-0.5 rounded bg-white text-black font-black text-[10px]">
+                      <span className="px-2 py-0.5 rounded bg-amber-500 text-black font-black text-[10px]">
                         Sen: "{me.bubble}"
                       </span>
                     )}
                   </div>
 
-                  <div className="grid grid-cols-3 sm:grid-cols-6 gap-1.5">
-                    <button
-                      onClick={() => sendGesture("thinking", "Hmm...")}
-                      className={`py-1.5 px-2 rounded-lg font-bold cursor-pointer border transition ${
-                        me?.expression === "thinking"
-                          ? "bg-amber-500 text-black border-amber-300"
-                          : "bg-white/10 hover:bg-white/20 text-white border-white/10"
-                      }`}
-                    >
-                      🤔 Hmm...
-                    </button>
-                    <button
-                      onClick={() => sendGesture("surprised", "Ha?!")}
-                      className={`py-1.5 px-2 rounded-lg font-bold cursor-pointer border transition ${
-                        me?.expression === "surprised"
-                          ? "bg-amber-500 text-black border-amber-300"
-                          : "bg-white/10 hover:bg-white/20 text-white border-white/10"
-                      }`}
-                    >
-                      😲 Ha?!
-                    </button>
-                    <button
-                      onClick={() => sendGesture("eureka", "Aha!")}
-                      className={`py-1.5 px-2 rounded-lg font-bold cursor-pointer border transition ${
-                        me?.expression === "eureka"
-                          ? "bg-amber-500 text-black border-amber-300"
-                          : "bg-white/10 hover:bg-white/20 text-white border-white/10"
-                      }`}
-                    >
-                      💡 Aha!
-                    </button>
-                    <button
-                      onClick={() => sendGesture("look_left", "👈...")}
-                      className={`py-1.5 px-2 rounded-lg font-bold cursor-pointer border transition ${
-                        me?.expression === "look_left"
-                          ? "bg-amber-500 text-black border-amber-300"
-                          : "bg-white/10 hover:bg-white/20 text-white border-white/10"
-                      }`}
-                    >
-                      👈 Sola Bak
-                    </button>
-                    <button
-                      onClick={() => sendGesture("look_right", "...👉")}
-                      className={`py-1.5 px-2 rounded-lg font-bold cursor-pointer border transition ${
-                        me?.expression === "look_right"
-                          ? "bg-amber-500 text-black border-amber-300"
-                          : "bg-white/10 hover:bg-white/20 text-white border-white/10"
-                      }`}
-                    >
-                      👉 Sağa Bak
-                    </button>
-                    <button
-                      onClick={() => sendGesture("neutral", "", "")}
-                      className="py-1.5 px-2 rounded-lg bg-white/5 hover:bg-white/15 text-neutral-300 border border-white/10 font-bold cursor-pointer"
-                    >
-                      😐 Normal
-                    </button>
+                  <div className="grid grid-cols-3 gap-1.5">
+                    {[
+                      ["thinking", "Hmm...", "🤔 Hmm..."],
+                      ["surprised", "Ha?!", "😲 Ha?!"],
+                      ["eureka", "Aha!", "💡 Aha!"],
+                      ["look_left", "👈...", "👈 Sola Bak"],
+                      ["look_right", "...👉", "👉 Sağa Bak"],
+                      ["neutral", "", "😐 Normal"],
+                    ].map(([exprKey, bub, label]) => (
+                      <button
+                        key={exprKey}
+                        onClick={() =>
+                          sendGesture(
+                            exprKey,
+                            bub,
+                            exprKey === "neutral" ? "" : undefined
+                          )
+                        }
+                        className={`py-1.5 px-2 rounded-lg text-[11px] font-bold cursor-pointer border transition whitespace-nowrap ${
+                          me?.expression === exprKey && exprKey !== "neutral"
+                            ? "bg-amber-500 text-black border-amber-300"
+                            : isDark
+                            ? "bg-white/10 hover:bg-white/20 text-white border-white/10"
+                            : "bg-white hover:bg-neutral-200 text-neutral-900 border-neutral-300"
+                        }`}
+                      >
+                        {label}
+                      </button>
+                    ))}
                   </div>
 
-                  {/* Son 2 Kayıt Özeti (Hızlı Bakış) */}
-                  <div className="pt-2 border-t border-white/10 space-y-1">
+                  {/* Son 2 Olay Kaydı Özeti */}
+                  <div className="pt-2 border-t border-neutral-500/20 space-y-1">
                     {(pub.logs || []).slice(-2).map((l, i) => (
-                      <div
-                        key={i}
-                        className="text-[11px] text-neutral-300 truncate"
-                      >
-                        <span className="font-mono text-neutral-500 mr-1.5">
+                      <div key={i} className="text-[11px] opacity-85 truncate">
+                        <span className="font-mono opacity-60 mr-1.5">
                           [{l.timestamp}]
                         </span>
                         <span>{l.message}</span>
@@ -1252,15 +1330,15 @@ export default function App() {
                     key={i}
                     className={`p-2 rounded-lg border text-xs ${
                       log.type === "conflict"
-                        ? "bg-red-950/60 border-red-500/50 text-red-200 font-bold"
+                        ? "bg-red-600/25 border-red-500/60 font-bold"
                         : log.type === "alert"
-                        ? "bg-amber-950/50 border-amber-500/40 text-amber-200 font-semibold"
-                        : log.type === "success"
-                        ? "bg-emerald-950/50 border-emerald-500/40 text-emerald-200"
-                        : "bg-white/5 border-white/10 text-neutral-200"
+                        ? "bg-amber-500/20 border-amber-500/50 font-semibold"
+                        : log.type === "policy"
+                        ? "bg-blue-500/15 border-blue-500/40"
+                        : subBoxClass
                     }`}
                   >
-                    <span className="font-mono text-[10px] text-neutral-400 mr-2">
+                    <span className="font-mono text-[10px] opacity-60 mr-2">
                       [{log.timestamp}]
                     </span>
                     <span>{log.message}</span>
@@ -1274,7 +1352,7 @@ export default function App() {
             {hudTab === "history" && (
               <div className="space-y-2 max-h-[55vh] overflow-y-auto pr-1">
                 {(!pub.history || pub.history.length === 0) && (
-                  <p className="text-neutral-400 italic">
+                  <p className="opacity-70 italic">
                     Henüz tamamlanmış bir oylama yok.
                   </p>
                 )}
@@ -1282,33 +1360,27 @@ export default function App() {
                   .slice()
                   .reverse()
                   .map((h, i) => {
-                    const lName = pub.players.find(
-                      (p) => p.id === h.leader_id
-                    )?.name;
-                    const pName = pub.players.find(
-                      (p) => p.id === h.partner_id
-                    )?.name;
                     return (
                       <div
                         key={i}
-                        className="p-2.5 rounded-lg bg-white/5 border border-white/10 space-y-1.5"
+                        className={`p-2.5 rounded-lg border space-y-1.5 ${subBoxClass}`}
                       >
                         <div className="flex justify-between items-center">
-                          <span className="font-bold text-amber-300">
-                            Tur #{h.round}: {lName} & {pName}
+                          <span className="font-bold text-amber-500">
+                            Tur #{h.round}: {h.leader_name} & {h.partner_name}
                           </span>
                           <span
                             className={`px-1.5 py-0.5 rounded font-bold text-[10px] ${
-                              h.approved
-                                ? "bg-emerald-500/20 text-emerald-300"
-                                : "bg-red-500/20 text-red-300"
+                              h.passed
+                                ? "bg-emerald-500/20 text-emerald-500"
+                                : "bg-red-500/20 text-red-500"
                             }`}
                           >
-                            {h.approved ? "ONAYLANDI" : "REDDEDİLDİ"}
+                            {h.passed ? "ONAYLANDI" : "REDDEDİLDİ"}
                           </span>
                         </div>
                         <div className="flex flex-wrap gap-1">
-                          {Object.entries(h.votes).map(([pid, v]) => {
+                          {Object.entries(h.votes || {}).map(([pid, v]) => {
                             const voter = pub.players.find(
                               (p) => p.id === pid
                             )?.name;
@@ -1317,11 +1389,11 @@ export default function App() {
                                 key={pid}
                                 className={`text-[10px] px-1.5 py-0.5 rounded ${
                                   v === "YES"
-                                    ? "bg-emerald-500/20 text-emerald-300"
-                                    : "bg-red-500/20 text-red-300"
+                                    ? "bg-emerald-500/20 text-emerald-500"
+                                    : "bg-red-500/20 text-red-500"
                                 }`}
                               >
-                                {voter}: {v === "YES" ? "E" : "H"}
+                                {voter}: {v === "YES" ? "EVET" : "HAYIR"}
                               </span>
                             );
                           })}
@@ -1341,15 +1413,15 @@ export default function App() {
 function translatePhase(phase) {
   switch (phase) {
     case "LOBBY":
-      return "Lobi";
+      return "Başlangıç Menüsü";
     case "NOMINATION":
       return "Ortak Seçimi";
     case "VOTING":
       return "Masa Oylaması";
     case "LEGISLATE_LEADER":
-      return "Lider Yasa Elemesi";
+      return "Lider Kart Elemesi";
     case "LEGISLATE_PARTNER":
-      return "Ortak Yasa Seçimi";
+      return "Ortak Kart Seçimi";
     case "CLAIMING":
       return "Beyan & Çelişki";
     case "POWERS_PEEK":

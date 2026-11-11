@@ -7,7 +7,8 @@ import (
 	"time"
 )
 
-const AppVersion = "v0.6.0"
+const AppVersion = "v0.7.0"
+const DefaultPhaseSeconds = 10
 
 type Room struct {
 	mu           sync.RWMutex
@@ -26,8 +27,9 @@ type Room struct {
 	PrevPartnerID string
 
 	// Tur içi gizli kartlar
-	LeaderCards  []Policy // Liderin elindeki 3 kart
-	PartnerCards []Policy // Ortağa iletilen 2 kart
+	LeaderCards       []Policy // Liderin elindeki 3 kart
+	ActualLeaderDrawn []Policy // Liderin desteden gerçekten çektiği 3 kart (doğruluk için)
+	PartnerCards      []Policy // Ortağa iletilen 2 kart
 
 	// Oylama
 	Votes        map[string]string // ID -> "YES" / "NO"
@@ -38,7 +40,7 @@ type Room struct {
 	CurrentClaim *Claim
 
 	// Masaüstü Şüphe/Güven Çipleri
-	// Suspicions[sourceID][targetID] = "SUSPICIOUS" | "TRUSTED"
+	// Suspicions[sourceID][targetID] = "SUSPECT" | "TRUSTED"
 	Suspicions map[string]map[string]string
 
 	PeekedCards []Policy // Liderin incelediği kartlar
@@ -46,6 +48,11 @@ type Room struct {
 	Winner    string
 	WinReason string
 	Logs      []LogEntry
+
+	// Faz Zamanlayıcısı (10 saniye karar süresi)
+	phaseSeq      uint64
+	phaseDuration int
+	phaseEndsAt   time.Time
 
 	// Olay dinleyicisi callback (WebSocket bildirimleri için)
 	OnStateChange func()
@@ -72,21 +79,140 @@ func (r *Room) AddPlayer(id, name string, isBot bool, avatar string) *Player {
 
 	for _, p := range r.Players {
 		if p.ID == id {
+			if name != "" {
+				p.Name = name
+			}
 			return p
 		}
 	}
 
 	p := &Player{
-		ID:      id,
-		Name:    name,
-		IsBot:   isBot,
-		IsAlive: true,
-		Avatar:  avatar,
+		ID:         id,
+		Name:       name,
+		IsBot:      isBot,
+		IsAlive:    true,
+		Avatar:     avatar,
+		Expression: "neutral",
 	}
 	r.Players = append(r.Players, p)
 	r.Suspicions[id] = make(map[string]string)
 	r.addLog(fmt.Sprintf("%s masaya katıldı.", name), "info")
 	return p
+}
+
+var lobbyBotPool = []struct {
+	Name   string
+	Avatar string
+}{
+	{"Ajan Kaya", "🕶️"},
+	{"Mühendis Ece", "🦊"},
+	{"Analist Can", "🦉"},
+	{"Operatör Deniz", "🦁"},
+	{"Kriptolog Bora", "🎩"},
+	{"Diplomat Zeynep", "🕊️"},
+}
+
+func (r *Room) AddBot() {
+	r.mu.Lock()
+	if r.Phase != PhaseLobby || len(r.Players) >= 7 {
+		r.mu.Unlock()
+		return
+	}
+
+	used := make(map[string]bool)
+	for _, p := range r.Players {
+		used[p.Name] = true
+	}
+
+	var pickedName, pickedAvatar string
+	for _, b := range lobbyBotPool {
+		if !used[b.Name] {
+			pickedName = b.Name
+			pickedAvatar = b.Avatar
+			break
+		}
+	}
+	if pickedName == "" {
+		pickedName = fmt.Sprintf("Ajan #%d", len(r.Players))
+		pickedAvatar = "🎭"
+	}
+
+	botID := fmt.Sprintf("bot-%d", time.Now().UnixNano()%100000+int64(len(r.Players)))
+	p := &Player{
+		ID:         botID,
+		Name:       pickedName,
+		IsBot:      true,
+		IsAlive:    true,
+		Avatar:     pickedAvatar,
+		Expression: "neutral",
+	}
+	r.Players = append(r.Players, p)
+	r.Suspicions[botID] = make(map[string]string)
+	r.addLog(fmt.Sprintf("%s masaya oturdu.", pickedName), "info")
+	r.mu.Unlock()
+	r.notifyChange()
+}
+
+func (r *Room) RemoveBot(targetID string) {
+	r.mu.Lock()
+	if r.Phase != PhaseLobby {
+		r.mu.Unlock()
+		return
+	}
+	filtered := make([]*Player, 0, len(r.Players))
+	for _, p := range r.Players {
+		if p.ID == targetID && p.IsBot {
+			r.addLog(fmt.Sprintf("%s masadan ayrıldı.", p.Name), "info")
+			continue
+		}
+		filtered = append(filtered, p)
+	}
+	r.Players = filtered
+	r.mu.Unlock()
+	r.notifyChange()
+}
+
+func (r *Room) RemoveLobbyPlayer(targetID string) {
+	r.mu.Lock()
+	if r.Phase != PhaseLobby {
+		r.mu.Unlock()
+		return
+	}
+	filtered := make([]*Player, 0, len(r.Players))
+	changed := false
+	for _, p := range r.Players {
+		if p.ID == targetID && !p.IsBot {
+			changed = true
+			continue
+		}
+		filtered = append(filtered, p)
+	}
+	r.Players = filtered
+	r.mu.Unlock()
+	if changed {
+		r.notifyChange()
+	}
+}
+
+func (r *Room) ReturnToLobby() {
+	r.mu.Lock()
+	r.phaseSeq++
+	r.Phase = PhaseLobby
+	r.Winner = ""
+	r.WinReason = ""
+	r.PartnerID = ""
+	r.CurrentClaim = nil
+	r.LeaderCards = nil
+	r.PartnerCards = nil
+	r.PeekedCards = nil
+	for _, p := range r.Players {
+		p.IsAlive = true
+		p.Expression = "neutral"
+		p.Bubble = ""
+		p.TargetID = ""
+	}
+	r.mu.Unlock()
+	r.notifyChange()
 }
 
 func (r *Room) StartGameWithBots() error {
@@ -96,31 +222,53 @@ func (r *Room) StartGameWithBots() error {
 		return fmt.Errorf("masada hiç oyuncu yok")
 	}
 
-	// 5 kişiye tamamlamak için bot ekle
-	botNames := []string{"Ajan Kaya", "Mühendis Ece", "Analist Can", "Operatör Deniz"}
-	avatars := []string{"🤖", "🦊", "🦉", "🦁"}
+	// En az 5 kişiye tamamlamak için bot ekle
+	used := make(map[string]bool)
+	for _, p := range r.Players {
+		used[p.Name] = true
+	}
 	bIdx := 0
-	for len(r.Players) < 5 && bIdx < len(botNames) {
+	for len(r.Players) < 5 && bIdx < len(lobbyBotPool) {
+		cand := lobbyBotPool[bIdx]
+		bIdx++
+		if used[cand.Name] {
+			continue
+		}
+		used[cand.Name] = true
+		botID := fmt.Sprintf("bot-%d-%d", bIdx, time.Now().UnixNano()%1000)
 		p := &Player{
-			ID:      fmt.Sprintf("bot-%d", bIdx+1),
-			Name:    botNames[bIdx],
-			IsBot:   true,
-			IsAlive: true,
-			Avatar:  avatars[bIdx],
+			ID:         botID,
+			Name:       cand.Name,
+			IsBot:      true,
+			IsAlive:    true,
+			Avatar:     cand.Avatar,
+			Expression: "neutral",
 		}
 		r.Players = append(r.Players, p)
 		r.Suspicions[p.ID] = make(map[string]string)
-		bIdx++
 	}
 
-	// Rolleri ata (5 oyuncu için: 3 Koruyucu, 1 Casus, 1 Gizli Lider)
-	roles := []Role{RoleProtector, RoleProtector, RoleProtector, RoleSpy, RoleSecretLeader}
-	rand.Seed(time.Now().UnixNano())
+	// 5, 6 veya 7 oyuncu için dengeli rol dağılımı
+	n := len(r.Players)
+	var roles []Role
+	switch {
+	case n >= 7:
+		roles = []Role{RoleProtector, RoleProtector, RoleProtector, RoleProtector, RoleSpy, RoleSpy, RoleSecretLeader}
+	case n == 6:
+		roles = []Role{RoleProtector, RoleProtector, RoleProtector, RoleProtector, RoleSpy, RoleSecretLeader}
+	default:
+		roles = []Role{RoleProtector, RoleProtector, RoleProtector, RoleSpy, RoleSecretLeader}
+	}
+
 	rand.Shuffle(len(roles), func(i, j int) { roles[i], roles[j] = roles[j], roles[i] })
 
 	for i, p := range r.Players {
-		p.Role = roles[i]
+		p.Role = roles[i%len(roles)]
 		p.IsAlive = true
+		p.Expression = "neutral"
+		p.Bubble = ""
+		p.TargetID = ""
+		r.Suspicions[p.ID] = make(map[string]string)
 	}
 
 	// Desteyi oluştur: 6 Mavi, 11 Kırmızı = 17 Kart
@@ -139,17 +287,135 @@ func (r *Room) StartGameWithBots() error {
 	r.WinReason = ""
 	r.CurrentClaim = nil
 	r.LastVoteItem = nil
+	r.VoteHistory = make([]VoteHistoryItem, 0)
+	r.Votes = make(map[string]string)
+	r.LeaderCards = nil
+	r.ActualLeaderDrawn = nil
+	r.PartnerCards = nil
+	r.PeekedCards = nil
 
 	leader := r.Players[r.LeaderIdx]
 	r.addLog("Oyun başladı! Roller dağıtıldı ve 17 yasa kartı karıştırıldı.", "alert")
 	r.addLog(fmt.Sprintf("İlk Lider: %s. Ortak adayını belirlemesi bekleniyor.", leader.Name), "info")
+	r.armPhaseTimerLocked(PhaseNomination, DefaultPhaseSeconds)
 
 	r.mu.Unlock()
 	r.notifyChange()
 
-	// Eğer ilk lider botsa aday önersin
 	r.checkBotAction()
 	return nil
+}
+
+// armPhaseTimerLocked her faz için 10 saniyelik otoriter zamanlayıcı kurar (mu kilitliyken çağrılır)
+func (r *Room) armPhaseTimerLocked(expectedPhase GamePhase, seconds int) {
+	r.phaseSeq++
+	seq := r.phaseSeq
+	r.phaseDuration = seconds
+	r.phaseEndsAt = time.Now().Add(time.Duration(seconds) * time.Second)
+
+	time.AfterFunc(time.Duration(seconds)*time.Second+150*time.Millisecond, func() {
+		r.handlePhaseTimeout(seq, expectedPhase)
+	})
+}
+
+func (r *Room) handlePhaseTimeout(seq uint64, expectedPhase GamePhase) {
+	r.mu.Lock()
+	if r.phaseSeq != seq || r.Phase != expectedPhase || r.Phase == PhaseLobby || r.Phase == PhaseGameOver {
+		r.mu.Unlock()
+		return
+	}
+
+	leader := r.getCurrentLeader()
+	partnerID := r.PartnerID
+	r.mu.Unlock()
+
+	switch expectedPhase {
+	case PhaseNomination:
+		if leader != nil {
+			r.mu.RLock()
+			var pick string
+			for _, p := range r.Players {
+				if p.ID != leader.ID && p.IsAlive && (p.ID != r.PrevPartnerID || r.countAlivePlayers() <= 5) {
+					pick = p.ID
+					break
+				}
+			}
+			r.mu.RUnlock()
+			if pick != "" {
+				r.addLog(fmt.Sprintf("⏱️ Süre doldu: Lider %s otomatik aday seçti.", leader.Name), "info")
+				_ = r.NominatePartner(leader.ID, pick)
+			}
+		}
+
+	case PhaseVoting:
+		r.mu.RLock()
+		missing := make([]string, 0)
+		for _, p := range r.Players {
+			if p.IsAlive {
+				if _, voted := r.Votes[p.ID]; !voted {
+					missing = append(missing, p.ID)
+				}
+			}
+		}
+		r.mu.RUnlock()
+		if len(missing) > 0 {
+			r.addLog("⏱️ Oylama süresi doldu, kullanılmayan oylar Çekimser/Evet sayıldı.", "info")
+			for _, id := range missing {
+				_ = r.CastVote(id, "YES")
+			}
+		}
+
+	case PhaseLegislateLeader:
+		if leader != nil {
+			r.addLog(fmt.Sprintf("⏱️ Süre doldu: Lider %s otomatik bir kart eledi.", leader.Name), "info")
+			_ = r.LeaderDiscard(leader.ID, 0)
+		}
+
+	case PhaseLegislatePartner:
+		if partnerID != "" {
+			r.addLog("⏱️ Süre doldu: Ortak kalan kartlardan birini yürürlüğe koydu.", "info")
+			_ = r.PartnerEnact(partnerID, 0)
+		}
+
+	case PhaseClaiming:
+		r.mu.RLock()
+		claim := r.CurrentClaim
+		pCards := append([]Policy{}, r.PartnerCards...)
+		lDrawn := append([]Policy{}, r.ActualLeaderDrawn...)
+		r.mu.RUnlock()
+		if claim != nil {
+			if leader != nil && !claim.LeaderClaimed {
+				_ = r.SubmitLeaderClaim(leader.ID, lDrawn, pCards)
+			}
+			if partnerID != "" && !claim.PartnerClaimed {
+				_ = r.SubmitPartnerClaim(partnerID, pCards)
+			}
+		}
+
+	case PhasePowersPeek:
+		if leader != nil {
+			_ = r.ClosePeek(leader.ID)
+		}
+
+	case PhasePowersExecution:
+		if leader != nil {
+			r.mu.RLock()
+			var pick string
+			for _, p := range r.Players {
+				if p.ID != leader.ID && p.IsAlive {
+					pick = p.ID
+					break
+				}
+			}
+			r.mu.RUnlock()
+			if pick != "" {
+				_ = r.ExecutePlayer(leader.ID, pick)
+			}
+		}
+
+	case PhaseSuspicionMarking:
+		r.FinishSuspicionMarking()
+	}
 }
 
 func (r *Room) initDeck() {
@@ -167,10 +433,20 @@ func (r *Room) initDeck() {
 
 func (r *Room) checkDeck() {
 	if len(r.Deck) < 3 {
-		r.addLog("Destedeki kartlar azaldı. Atılan kartlar desteye karıştırılıyor.", "info")
+		r.addLog("Destedeki kartlar azaldı. Iskarta kartları desteye karıştırılıyor.", "info")
 		r.Deck = append(r.Deck, r.DiscardPile...)
 		r.DiscardPile = make([]Policy, 0)
 		rand.Shuffle(len(r.Deck), func(i, j int) { r.Deck[i], r.Deck[j] = r.Deck[j], r.Deck[i] })
+	}
+}
+
+func (r *Room) clearTempBubblesLocked() {
+	for _, p := range r.Players {
+		if p.Expression != "pointing" {
+			p.Expression = "neutral"
+			p.Bubble = ""
+			p.TargetID = ""
+		}
 	}
 }
 
@@ -193,7 +469,7 @@ func (r *Room) NominatePartner(leaderID, candidateID string) error {
 		return fmt.Errorf("lider kendini ortak seçemez")
 	}
 
-	// Uygunluk kontrolü: önceki ortak tekrar seçilemez
+	// Uygunluk kontrolü: 6+ oyuncu hayattayken önceki ortak tekrar seçilemez
 	if candidateID == r.PrevPartnerID && r.countAlivePlayers() > 5 {
 		r.mu.Unlock()
 		return fmt.Errorf("önceki ortak tekrar seçilemez")
@@ -214,7 +490,11 @@ func (r *Room) NominatePartner(leaderID, candidateID string) error {
 	r.PartnerID = candidateID
 	r.Phase = PhaseVoting
 	r.Votes = make(map[string]string)
-	r.addLog(fmt.Sprintf("%s, Ortak (Şansölye) adayı olarak %s'yi önerdi. Oylama başladı!", currentLeader.Name, candidate.Name), "vote")
+	currentLeader.Expression = "pointing"
+	currentLeader.Bubble = fmt.Sprintf("👉 Adayım %s", candidate.Name)
+	currentLeader.TargetID = candidateID
+	r.addLog(fmt.Sprintf("%s, Ortak adayı olarak %s'yi önerdi. Oylama başladı!", currentLeader.Name, candidate.Name), "vote")
+	r.armPhaseTimerLocked(PhaseVoting, DefaultPhaseSeconds)
 
 	r.mu.Unlock()
 	r.notifyChange()
@@ -259,7 +539,6 @@ func (r *Room) CastVote(playerID, vote string) error {
 
 	r.mu.Unlock()
 	r.notifyChange()
-	r.checkBotAction()
 	return nil
 }
 
@@ -297,28 +576,32 @@ func (r *Room) resolveVoting() {
 		r.addLog(fmt.Sprintf("Oylama KABUL EDİLDİ (%d Evet / %d Hayır). Hükümet kuruldu!", yesCount, noCount), "vote")
 		r.ChaosCounter = 0
 
-		// Gizli Lider Kazanma Koşulu:
 		// 3 Kırmızı yasa çıktıktan sonra Gizli Lider Ortak seçilirse Casuslar derhal kazanır!
 		if r.RedPolicies >= 3 && partner.Role == RoleSecretLeader {
 			r.Winner = "SPIES"
 			r.WinReason = fmt.Sprintf("Gizli Lider (%s) Ortak olarak seçildi ve oylamadan geçti! Casuslar zafer kazandı.", partner.Name)
 			r.Phase = PhaseGameOver
+			r.phaseSeq++
 			r.addLog(r.WinReason, "alert")
 			return
 		}
 
-		// Yasama fazına geç (Lider kart çeker)
+		// Yasama fazına geç (Lider masadaki desteden 3 kart çeker)
 		r.checkDeck()
 		r.LeaderCards = append([]Policy{}, r.Deck[:3]...)
+		r.ActualLeaderDrawn = append([]Policy{}, r.LeaderCards...)
 		r.Deck = r.Deck[3:]
 		r.PartnerCards = nil
+		r.clearTempBubblesLocked()
 		r.Phase = PhaseLegislateLeader
+		r.addLog(fmt.Sprintf("🃏 Lider %s masadaki desteden 3 gizli yasa kartı çekti.", leader.Name), "policy")
+		r.armPhaseTimerLocked(PhaseLegislateLeader, DefaultPhaseSeconds)
 	} else {
 		r.addLog(fmt.Sprintf("Oylama REDDEDİLDİ (%d Evet / %d Hayır). Kaos sayacı arttı.", yesCount, noCount), "vote")
 		r.ChaosCounter++
 
 		if r.ChaosCounter >= 3 {
-			r.addLog("Kaos zirve yaptı! Halk isyan etti: Destedeki en üst yasa zorla geçiriliyor!", "alert")
+			r.addLog("🔥 Kaos 3'e ulaştı! Destedeki en üst yasa doğrudan yürürlüğe giriyor!", "alert")
 			r.checkDeck()
 			enacted := r.Deck[0]
 			r.Deck = r.Deck[1:]
@@ -333,6 +616,7 @@ func (r *Room) resolveVoting() {
 		r.advanceLeader()
 		r.Phase = PhaseNomination
 		r.PartnerID = ""
+		r.armPhaseTimerLocked(PhaseNomination, DefaultPhaseSeconds)
 	}
 }
 
@@ -366,8 +650,9 @@ func (r *Room) LeaderDiscard(leaderID string, discardIdx int) error {
 	}
 	r.PartnerCards = passed
 	r.Phase = PhaseLegislatePartner
+	r.armPhaseTimerLocked(PhaseLegislatePartner, DefaultPhaseSeconds)
 
-	r.addLog(fmt.Sprintf("Lider %s 1 kartı eledi ve 2 gizli yasayı Ortağa (%s) iletti.", leader.Name, r.getPlayerByID(r.PartnerID).Name), "policy")
+	r.addLog(fmt.Sprintf("🃏 Lider %s 1 kartı eledi ve 2 kartı masadan Ortağa (%s) uzattı.", leader.Name, r.getPlayerByID(r.PartnerID).Name), "policy")
 
 	r.mu.Unlock()
 	r.notifyChange()
@@ -399,7 +684,7 @@ func (r *Room) PartnerEnact(partnerID string, enactIdx int) error {
 	r.DiscardPile = append(r.DiscardPile, r.PartnerCards[discardIdx])
 
 	partner := r.getPlayerByID(partnerID)
-	r.addLog(fmt.Sprintf("Ortak %s yasayı masaya sürdü!", partner.Name), "policy")
+	r.addLog(fmt.Sprintf("🃏 Ortak %s seçtiği yasayı masaya koydu!", partner.Name), "policy")
 
 	r.applyEnactedPolicy(enacted, false)
 
@@ -428,6 +713,7 @@ func (r *Room) applyEnactedPolicy(policy Policy, wasChaos bool) {
 		r.Winner = "PROTECTORS"
 		r.WinReason = "5 Koruyucu Yasası başarıyla yürürlüğe girdi. Koruyucular kazandı!"
 		r.Phase = PhaseGameOver
+		r.phaseSeq++
 		r.addLog(r.WinReason, "alert")
 		return
 	}
@@ -435,24 +721,25 @@ func (r *Room) applyEnactedPolicy(policy Policy, wasChaos bool) {
 		r.Winner = "SPIES"
 		r.WinReason = "6 Casus Yasası yürürlüğe girdi. Casuslar sistemi ele geçirdi!"
 		r.Phase = PhaseGameOver
+		r.phaseSeq++
 		r.addLog(r.WinReason, "alert")
 		return
 	}
 
 	if wasChaos {
-		// Kaos ile geçtiyse iddia veya başkan yetkisi olmaz, doğrudan sonraki tura geçer
 		r.advanceLeader()
 		r.Phase = PhaseNomination
 		r.PartnerID = ""
+		r.armPhaseTimerLocked(PhaseNomination, DefaultPhaseSeconds)
 		return
 	}
 
-	// Normal yasalaşmada sessiz protokolün kalbi: İDDİA (CLAIMING) ARAYÜZÜNE GEÇ!
 	r.CurrentClaim = &Claim{
 		PartnerEnacted: policy,
 	}
 	r.Phase = PhaseClaiming
-	r.addLog("İddia Aşaması: Lider ve Ortak ne çektiklerini masaya beyan ediyor.", "info")
+	r.addLog("İddia Aşaması: Lider ve Ortak kart beyanlarını sunuyor.", "info")
+	r.armPhaseTimerLocked(PhaseClaiming, DefaultPhaseSeconds)
 }
 
 // SubmitLeaderClaim Lider iddiasını bildirir
@@ -477,13 +764,15 @@ func (r *Room) SubmitLeaderClaim(leaderID string, drawn []Policy, passed []Polic
 	r.CurrentClaim.LeaderPassed = passed
 	r.CurrentClaim.LeaderClaimed = true
 
-	r.addLog(fmt.Sprintf("%s iddia etti: 'Desteden %s çektim, Ortağa %s ilettim.'", leader.Name, formatPolicies(drawn), formatPolicies(passed)), "info")
+	r.addLog(fmt.Sprintf("%s beyan etti: '3 kart (%s) çektim, Ortağa %s ilettim.'", leader.Name, formatPolicies(drawn), formatPolicies(passed)), "info")
 
-	r.checkClaims()
+	r.checkClaimsLocked()
 	r.mu.Unlock()
 	r.notifyChange()
 
-	r.checkBotAction()
+	if r.Phase != PhaseClaiming {
+		r.checkBotAction()
+	}
 	return nil
 }
 
@@ -508,38 +797,38 @@ func (r *Room) SubmitPartnerClaim(partnerID string, received []Policy) error {
 	r.CurrentClaim.PartnerClaimed = true
 
 	partner := r.getPlayerByID(partnerID)
-	r.addLog(fmt.Sprintf("%s iddia etti: 'Liderden bana %s geldi.'", partner.Name, formatPolicies(received)), "info")
+	r.addLog(fmt.Sprintf("%s beyan etti: 'Liderden bana %s geldi.'", partner.Name, formatPolicies(received)), "info")
 
-	r.checkClaims()
+	r.checkClaimsLocked()
 	r.mu.Unlock()
 	r.notifyChange()
 
-	r.checkBotAction()
+	if r.Phase != PhaseClaiming {
+		r.checkBotAction()
+	}
 	return nil
 }
 
-func (r *Room) checkClaims() {
+func (r *Room) checkClaimsLocked() {
 	if r.CurrentClaim.LeaderClaimed && r.CurrentClaim.PartnerClaimed {
-		// Çelişki kontrolü!
-		// Liderin ilettiğini iddia ettiği kartlar ile Ortağın aldığını iddia ettiği kartlar uyuşuyor mu?
 		lPassedBlue := countBlue(r.CurrentClaim.LeaderPassed)
 		lPassedRed := len(r.CurrentClaim.LeaderPassed) - lPassedBlue
 
 		pRecBlue := countBlue(r.CurrentClaim.PartnerReceived)
 		pRecRed := len(r.CurrentClaim.PartnerReceived) - pRecBlue
 
+		leader := r.getCurrentLeader()
+		leaderID := ""
+		if leader != nil {
+			leaderID = leader.ID
+		}
+
 		if lPassedBlue != pRecBlue || lPassedRed != pRecRed {
 			r.CurrentClaim.HasConflict = true
 			r.CurrentClaim.ConflictNote = fmt.Sprintf("ÇELİŞKİ! Lider %d Mavi/%d Kırmızı verdiğini, Ortak ise %d Mavi/%d Kırmızı aldığını iddia ediyor!", lPassedBlue, lPassedRed, pRecBlue, pRecRed)
-			r.addLog("⚡ DİKKAT: BEYANLARDA ÇELİŞKİ TESPİT EDİLDİ! BİRİ YALAN SÖYLÜYOR!", "conflict")
+			r.addLog("⚡ ÇELİŞKİ TESPİT EDİLDİ! BİRİ YALAN SÖYLÜYOR!", "conflict")
 
-			leader := r.getCurrentLeader()
-			leaderID := ""
-			if leader != nil {
-				leaderID = leader.ID
-			}
-
-			reactions := []string{"Ha?!", "Aha!", "Hmm...", "👉 Yalan!"}
+			reactions := []string{"Ha?!", "Aha!", "👉 Yalan!", "Hmm..."}
 			for i, p := range r.Players {
 				if p.IsBot && p.IsAlive {
 					if p.ID == leaderID && r.PartnerID != "" {
@@ -582,26 +871,26 @@ func (r *Room) checkClaims() {
 			}
 		}
 
-		// Şimdi yetki kontrolü yap: Son yasa Kırmızı ise yetki verilebilir mi?
+		// Yetki kontrolü
 		if r.CurrentClaim.PartnerEnacted == PolicyRed {
 			if r.RedPolicies == 3 {
-				// Gelecek 3 kartı inceleme yetkisi
 				r.Phase = PhasePowersPeek
 				r.checkDeck()
 				r.PeekedCards = append([]Policy{}, r.Deck[:min(3, len(r.Deck))]...)
-				r.addLog(fmt.Sprintf("3. Kırmızı Yasa Yetkisi: Lider (%s) destenin en üstündeki 3 yasayı inceliyor.", r.getCurrentLeader().Name), "alert")
+				r.addLog(fmt.Sprintf("👁️ 3. Kırmızı Yasa Yetkisi: Lider (%s) destenin üstündeki 3 kartı inceliyor.", r.getCurrentLeader().Name), "alert")
+				r.armPhaseTimerLocked(PhasePowersPeek, DefaultPhaseSeconds)
 				return
 			} else if r.RedPolicies == 4 || r.RedPolicies == 5 {
-				// İnfaz yetkisi
 				r.Phase = PhasePowersExecution
-				r.addLog(fmt.Sprintf("%d. Kırmızı Yasa Yetkisi: Lider (%s) masadan birini infaz etmek zorunda!", r.RedPolicies, r.getCurrentLeader().Name), "alert")
+				r.addLog(fmt.Sprintf("⚖️ %d. Kırmızı Yasa Yetkisi: Lider (%s) masadan birini infaz etmek zorunda!", r.RedPolicies, r.getCurrentLeader().Name), "alert")
+				r.armPhaseTimerLocked(PhasePowersExecution, DefaultPhaseSeconds)
 				return
 			}
 		}
 
-		// Yetki yoksa Şüphe işaretleme fazına geç
 		r.Phase = PhaseSuspicionMarking
-		r.addLog("Masa Şüphe İşaretleme Aşaması: Oyuncular avatarlara çip yerleştirebilir.", "info")
+		r.addLog("Şüphe & İşaret Aşaması: Parmağınla işaret edebilir veya çip bırakabilirsin.", "info")
+		r.armPhaseTimerLocked(PhaseSuspicionMarking, DefaultPhaseSeconds)
 	}
 }
 
@@ -612,8 +901,14 @@ func (r *Room) ClosePeek(leaderID string) error {
 		r.mu.Unlock()
 		return fmt.Errorf("peek fazında değil")
 	}
+	leader := r.getCurrentLeader()
+	if leader == nil || leader.ID != leaderID {
+		r.mu.Unlock()
+		return fmt.Errorf("sadece lider kapatabilir")
+	}
 	r.PeekedCards = nil
 	r.Phase = PhaseSuspicionMarking
+	r.armPhaseTimerLocked(PhaseSuspicionMarking, DefaultPhaseSeconds)
 	r.mu.Unlock()
 	r.notifyChange()
 	r.checkBotAction()
@@ -641,13 +936,16 @@ func (r *Room) ExecutePlayer(leaderID, targetID string) error {
 	}
 
 	target.IsAlive = false
+	target.Expression = "surprised"
+	target.Bubble = "💀..."
 	r.addLog(fmt.Sprintf("⚖️ LİDER %s, %s OYUNCUSUNU İNFAZ ETTİ!", leader.Name, target.Name), "alert")
 
-	// Eğer Gizli Lider infaz edildiyse Koruyucular anında kazanır!
+	// Gizli Lider infaz edildiyse Koruyucular anında kazanır!
 	if target.Role == RoleSecretLeader {
 		r.Winner = "PROTECTORS"
 		r.WinReason = fmt.Sprintf("Gizli Lider (%s) infaz edildi! Koruyucular kazandı!", target.Name)
 		r.Phase = PhaseGameOver
+		r.phaseSeq++
 		r.addLog(r.WinReason, "alert")
 		r.mu.Unlock()
 		r.notifyChange()
@@ -656,6 +954,7 @@ func (r *Room) ExecutePlayer(leaderID, targetID string) error {
 
 	r.addLog(fmt.Sprintf("%s Gizli Lider değildi. Oyun devam ediyor.", target.Name), "info")
 	r.Phase = PhaseSuspicionMarking
+	r.armPhaseTimerLocked(PhaseSuspicionMarking, DefaultPhaseSeconds)
 
 	r.mu.Unlock()
 	r.notifyChange()
@@ -668,13 +967,17 @@ func (r *Room) ToggleSuspicion(sourceID, targetID, chipType string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
+	if chipType == "SUSPICIOUS" {
+		chipType = "SUSPECT"
+	}
+
 	if _, ok := r.Suspicions[sourceID]; !ok {
 		r.Suspicions[sourceID] = make(map[string]string)
 	}
 
 	current := r.Suspicions[sourceID][targetID]
 	if current == chipType {
-		delete(r.Suspicions[sourceID], targetID) // Kaldır
+		delete(r.Suspicions[sourceID], targetID)
 	} else {
 		r.Suspicions[sourceID][targetID] = chipType
 	}
@@ -687,8 +990,9 @@ func (r *Room) SetExpression(playerID, expr, bubble, targetID string) {
 
 	p := r.getPlayerByID(playerID)
 	var pointedBot *Player
+	var pName string
 	if p != nil {
-		// Eğer işaret etme seçildiyse ve hedef boşsa otomatik mantıklı bir hedef seç
+		pName = p.Name
 		if expr == "pointing" && targetID == "" {
 			if r.PartnerID != "" && r.PartnerID != playerID {
 				targetID = r.PartnerID
@@ -711,8 +1015,8 @@ func (r *Room) SetExpression(playerID, expr, bubble, targetID string) {
 		if expr == "pointing" && targetID != "" {
 			target := r.getPlayerByID(targetID)
 			if target != nil {
-				r.addLog(fmt.Sprintf("🫵 %s parmağıyla %s oyuncusunu işaret etti! (%s)", p.Name, target.Name, bubble), "info")
-				if target.IsBot && target.IsAlive {
+				r.addLog(fmt.Sprintf("🫵 %s parmağıyla %s oyuncusunu işaret etti!", p.Name, target.Name), "info")
+				if target.IsBot && target.IsAlive && !p.IsBot {
 					pointedBot = target
 				}
 			}
@@ -721,7 +1025,7 @@ func (r *Room) SetExpression(playerID, expr, bubble, targetID string) {
 	r.mu.Unlock()
 	r.notifyChange()
 
-	// İşaret edilen bot kısa süre sonra tepki versin (şaşırma, geri işaret etme veya sağa sola bakma)
+	// Gerçek oyuncu bir botu parmakla işaret ederse bot kısa süre sonra tepki verir!
 	if pointedBot != nil {
 		go func(bID, pointerID, pointerName string) {
 			time.Sleep(1100 * time.Millisecond)
@@ -745,7 +1049,7 @@ func (r *Room) SetExpression(playerID, expr, bubble, targetID string) {
 			}
 			r.mu.Unlock()
 			r.notifyChange()
-		}(pointedBot.ID, playerID, p.Name)
+		}(pointedBot.ID, playerID, pName)
 	}
 }
 
@@ -757,16 +1061,20 @@ func (r *Room) FinishSuspicionMarking() {
 		return
 	}
 
-	r.PrevLeaderID = r.getCurrentLeader().ID
+	if l := r.getCurrentLeader(); l != nil {
+		r.PrevLeaderID = l.ID
+	}
 	r.PrevPartnerID = r.PartnerID
 	r.advanceLeader()
 	r.Round++
 	r.Phase = PhaseNomination
 	r.PartnerID = ""
 	r.CurrentClaim = nil
+	r.clearTempBubblesLocked()
 
 	newLeader := r.getCurrentLeader()
 	r.addLog(fmt.Sprintf("Yeni Tur (#%d). Sıradaki Lider: %s", r.Round, newLeader.Name), "info")
+	r.armPhaseTimerLocked(PhaseNomination, DefaultPhaseSeconds)
 
 	r.mu.Unlock()
 	r.notifyChange()
@@ -859,41 +1167,49 @@ func (r *Room) GetPrivateView(playerID string) PrivatePlayerView {
 		leaderID = leader.ID
 	}
 
-	// Oylama devam ederken kimin ne oy verdiği gizlidir; bitince açılır
 	exposedVotes := make(map[string]string)
 	if r.Phase != PhaseVoting {
 		for k, v := range r.Votes {
 			exposedVotes[k] = v
 		}
 	} else {
-		// Sadece kimlerin oy verip vermediğini göster
 		for k := range r.Votes {
 			exposedVotes[k] = "VOTED"
 		}
 	}
 
+	remaining := 0
+	if !r.phaseEndsAt.IsZero() && r.Phase != PhaseLobby && r.Phase != PhaseGameOver {
+		remaining = int(time.Until(r.phaseEndsAt).Seconds() + 0.5)
+		if remaining < 0 {
+			remaining = 0
+		}
+	}
+
 	pub := PublicGameState{
-		Phase:         r.Phase,
-		Round:         r.Round,
-		ChaosCounter:  r.ChaosCounter,
-		BluePolicies:  r.BluePolicies,
-		RedPolicies:   r.RedPolicies,
-		DeckCount:     len(r.Deck),
-		DiscardCount:  len(r.DiscardPile),
-		Players:       publicPlayers,
-		LeaderID:      leaderID,
-		PartnerID:     r.PartnerID,
-		PrevLeaderID:  r.PrevLeaderID,
-		PrevPartnerID: r.PrevPartnerID,
-		Votes:         exposedVotes,
-		LastVoteItem:  r.LastVoteItem,
-		History:       r.VoteHistory,
-		Logs:          r.Logs,
-		CurrentClaim:  r.CurrentClaim,
-		Winner:        r.Winner,
-		WinReason:     r.WinReason,
-		Suspicions:    r.Suspicions,
-		Version:       AppVersion,
+		Phase:          r.Phase,
+		Round:          r.Round,
+		PhaseDuration:  r.phaseDuration,
+		PhaseRemaining: remaining,
+		ChaosCounter:   r.ChaosCounter,
+		BluePolicies:   r.BluePolicies,
+		RedPolicies:    r.RedPolicies,
+		DeckCount:      len(r.Deck),
+		DiscardCount:   len(r.DiscardPile),
+		Players:        publicPlayers,
+		LeaderID:       leaderID,
+		PartnerID:      r.PartnerID,
+		PrevLeaderID:   r.PrevLeaderID,
+		PrevPartnerID:  r.PrevPartnerID,
+		Votes:          exposedVotes,
+		LastVoteItem:   r.LastVoteItem,
+		History:        r.VoteHistory,
+		Logs:           r.Logs,
+		CurrentClaim:   r.CurrentClaim,
+		Winner:         r.Winner,
+		WinReason:      r.WinReason,
+		Suspicions:     r.Suspicions,
+		Version:        AppVersion,
 	}
 
 	view := PrivatePlayerView{
@@ -904,7 +1220,6 @@ func (r *Room) GetPrivateView(playerID string) PrivatePlayerView {
 	if me != nil {
 		view.YourRole = me.Role
 
-		// 5 kişilik oyunda Casus ve Gizli Lider birbirini bilir
 		if me.Role == RoleSpy || me.Role == RoleSecretLeader {
 			for _, p := range r.Players {
 				if p.Role == RoleSecretLeader {
@@ -916,7 +1231,6 @@ func (r *Room) GetPrivateView(playerID string) PrivatePlayerView {
 			}
 		}
 
-		// Kart çekimlerinde sadece ilgili kişiye elindeki kartlar gönderilir
 		if r.Phase == PhaseLegislateLeader && leaderID == playerID {
 			view.DrawnPolicies = r.LeaderCards
 		} else if r.Phase == PhaseLegislatePartner && r.PartnerID == playerID {
@@ -929,31 +1243,37 @@ func (r *Room) GetPrivateView(playerID string) PrivatePlayerView {
 	return view
 }
 
-// --- BOT YAPAY ZEKASI (RULES-BASED BOT SIMULATION & GESTURES) ---
+// --- BOT YAPAY ZEKASI VE 3D MASA JESTLERİ ---
 func (r *Room) checkBotAction() {
 	go func() {
-		time.Sleep(1000 * time.Millisecond) // İlk gözlem payı
+		time.Sleep(900 * time.Millisecond)
 
 		r.mu.RLock()
 		phase := r.Phase
+		seq := r.phaseSeq
 		leader := r.getCurrentLeader()
 		partnerID := r.PartnerID
 		partner := r.getPlayerByID(partnerID)
+		aliveCount := r.countAlivePlayers()
 		r.mu.RUnlock()
 
-		// Faz başında botların canlı masa mimikleri ve parmakla işaret etme davranışları
-		r.triggerBotTableGestures(phase)
+		// Masadaki botların mimik / bakış / parmakla işaret etme davranışları
+		r.triggerBotTableGestures(phase, seq)
 
 		switch phase {
 		case PhaseNomination:
 			if leader != nil && leader.IsBot && leader.IsAlive {
-				// Lider bot düşünürken masaya baksın
 				r.SetExpression(leader.ID, "thinking", "Hmm... Kimi seçsem?", "")
 				time.Sleep(2400 * time.Millisecond)
+
 				r.mu.RLock()
+				if r.Phase != PhaseNomination || r.phaseSeq != seq {
+					r.mu.RUnlock()
+					return
+				}
 				candidates := make([]string, 0)
 				for _, p := range r.Players {
-					if p.ID != leader.ID && p.IsAlive && p.ID != r.PrevPartnerID {
+					if p.ID != leader.ID && p.IsAlive && (p.ID != r.PrevPartnerID || aliveCount <= 5) {
 						candidates = append(candidates, p.ID)
 					}
 				}
@@ -961,8 +1281,13 @@ func (r *Room) checkBotAction() {
 
 				if len(candidates) > 0 {
 					pick := candidates[rand.Intn(len(candidates))]
-					r.SetExpression(leader.ID, "pointing", "👉 Seni aday gösteriyorum!", pick)
-					time.Sleep(700 * time.Millisecond)
+					pickPlayer := r.getPlayerByID(pick)
+					pickName := ""
+					if pickPlayer != nil {
+						pickName = pickPlayer.Name
+					}
+					r.SetExpression(leader.ID, "pointing", fmt.Sprintf("👉 Adayım %s!", pickName), pick)
+					time.Sleep(900 * time.Millisecond)
 					_ = r.NominatePartner(leader.ID, pick)
 				}
 			}
@@ -975,16 +1300,17 @@ func (r *Room) checkBotAction() {
 						botID := p.ID
 						botRole := p.Role
 						go func(bID string, bRole Role) {
-							// Her bot masada farklı zamanda düşünsün (2 ila 6 saniye)
-							delay := time.Duration(1800+rand.Intn(4000)) * time.Millisecond
+							delay := time.Duration(1800+rand.Intn(3600)) * time.Millisecond
 							time.Sleep(delay)
+							r.mu.RLock()
+							stillVoting := r.Phase == PhaseVoting && r.phaseSeq == seq
+							r.mu.RUnlock()
+							if !stillVoting {
+								return
+							}
 							vote := "YES"
-							if bRole == RoleProtector {
-								if rand.Float32() < 0.30 {
-									vote = "NO"
-								}
-							} else {
-								vote = "YES"
+							if bRole == RoleProtector && rand.Float32() < 0.28 {
+								vote = "NO"
 							}
 							_ = r.CastVote(bID, vote)
 						}(botID, botRole)
@@ -996,9 +1322,12 @@ func (r *Room) checkBotAction() {
 		case PhaseLegislateLeader:
 			if leader != nil && leader.IsBot {
 				r.SetExpression(leader.ID, "thinking", "Hmm... Kartlara bakalım", "")
-				// Lider bot kartları 3.2 saniye incelesin
 				time.Sleep(3200 * time.Millisecond)
 				r.mu.RLock()
+				if r.Phase != PhaseLegislateLeader || r.phaseSeq != seq {
+					r.mu.RUnlock()
+					return
+				}
 				cards := r.LeaderCards
 				role := leader.Role
 				r.mu.RUnlock()
@@ -1024,10 +1353,13 @@ func (r *Room) checkBotAction() {
 
 		case PhaseLegislatePartner:
 			if partner != nil && partner.IsBot {
-				r.SetExpression(partner.ID, "thinking", "Hmm... Hangi yasayı seçsem?", "")
-				// Ortak bot 3.5 saniye düşünsün
-				time.Sleep(3500 * time.Millisecond)
+				r.SetExpression(partner.ID, "thinking", "Hmm... Hangi yasa?", "")
+				time.Sleep(3400 * time.Millisecond)
 				r.mu.RLock()
+				if r.Phase != PhaseLegislatePartner || r.phaseSeq != seq {
+					r.mu.RUnlock()
+					return
+				}
 				cards := r.PartnerCards
 				role := partner.Role
 				r.mu.RUnlock()
@@ -1052,45 +1384,60 @@ func (r *Room) checkBotAction() {
 			}
 
 		case PhaseClaiming:
-			time.Sleep(2200 * time.Millisecond)
+			time.Sleep(2000 * time.Millisecond)
 			r.mu.RLock()
-			claim := r.CurrentClaim
-			r.mu.RUnlock()
-
-			if claim == nil {
+			if r.Phase != PhaseClaiming || r.phaseSeq != seq || r.CurrentClaim == nil {
+				r.mu.RUnlock()
 				return
 			}
+			claim := r.CurrentClaim
+			lDrawn := append([]Policy{}, r.ActualLeaderDrawn...)
+			pCards := append([]Policy{}, r.PartnerCards...)
+			r.mu.RUnlock()
 
-			// Lider botsa beyan ver
+			// Lider botsa beyan ver (Casus ise yalan söyleyebilir)
 			if leader != nil && leader.IsBot && !claim.LeaderClaimed {
-				r.mu.RLock()
-				pCards := r.PartnerCards
-				role := leader.Role
-				r.mu.RUnlock()
-
-				// Koruyucu bot gerçeği söyler; Casus bot mavisi yoksa "3 kırmızı geldi" yalanı söyleyebilir
-				drawn := []Policy{PolicyBlue, PolicyRed, PolicyRed}
+				drawn := lDrawn
 				passed := pCards
-				if len(passed) == 0 {
+				if len(drawn) < 3 {
+					drawn = []Policy{PolicyBlue, PolicyRed, PolicyRed}
+				}
+				if len(passed) < 2 {
 					passed = []Policy{PolicyRed, PolicyRed}
 				}
-				if role == RoleProtector {
-					drawn = append([]Policy{}, passed...)
-					drawn = append(drawn, PolicyRed) // Temsili
+
+				if leader.Role != RoleProtector && countBlue(lDrawn) > 0 && claim.PartnerEnacted == PolicyRed {
+					// Casus/Gizli Lider "3 Kırmızı geldi, elimde yoktu!" yalanı söyleyebilir
+					drawn = []Policy{PolicyRed, PolicyRed, PolicyRed}
+					passed = []Policy{PolicyRed, PolicyRed}
 				}
 				_ = r.SubmitLeaderClaim(leader.ID, drawn, passed)
 			}
 
-			// Ortak botsa beyan ver
-			if partner != nil && partner.IsBot && !claim.PartnerClaimed {
+			// Ortak botsa beyan ver (Casus ise yalan söyleyebilir -> Çelişki!)
+			r.mu.RLock()
+			stillClaiming := r.Phase == PhaseClaiming && r.phaseSeq == seq
+			claimAfterLeader := r.CurrentClaim
+			r.mu.RUnlock()
+
+			if stillClaiming && partner != nil && partner.IsBot && claimAfterLeader != nil && !claimAfterLeader.PartnerClaimed {
 				time.Sleep(1600 * time.Millisecond)
 				r.mu.RLock()
-				pCards := r.PartnerCards
+				if r.Phase != PhaseClaiming || r.phaseSeq != seq {
+					r.mu.RUnlock()
+					return
+				}
+				rec := pCards
+				role := partner.Role
+				enacted := r.CurrentClaim.PartnerEnacted
 				r.mu.RUnlock()
 
-				rec := pCards
-				if len(rec) == 0 {
-					rec = []Policy{claim.PartnerEnacted, PolicyRed}
+				if len(rec) < 2 {
+					rec = []Policy{enacted, PolicyRed}
+				}
+				// Eğer Casus Ortak eline Mavi geldiği halde Kırmızı oynadıysa %70 ihtimalle "2 Kırmızı geldi" der!
+				if role != RoleProtector && enacted == PolicyRed && countBlue(rec) > 0 && rand.Float32() < 0.70 {
+					rec = []Policy{PolicyRed, PolicyRed}
 				}
 				_ = r.SubmitPartnerClaim(partner.ID, rec)
 			}
@@ -1098,15 +1445,24 @@ func (r *Room) checkBotAction() {
 		case PhasePowersPeek:
 			if leader != nil && leader.IsBot {
 				r.SetExpression(leader.ID, "eureka", "Aha! Desteyi gördüm!", "")
-				time.Sleep(3200 * time.Millisecond)
-				_ = r.ClosePeek(leader.ID)
+				time.Sleep(3500 * time.Millisecond)
+				r.mu.RLock()
+				ok := r.Phase == PhasePowersPeek && r.phaseSeq == seq
+				r.mu.RUnlock()
+				if ok {
+					_ = r.ClosePeek(leader.ID)
+				}
 			}
 
 		case PhasePowersExecution:
 			if leader != nil && leader.IsBot {
-				r.SetExpression(leader.ID, "thinking", "Hmm... Kimi infaz etmeliyim?", "")
-				time.Sleep(2500 * time.Millisecond)
+				r.SetExpression(leader.ID, "thinking", "Hmm... Kim Casus?", "")
+				time.Sleep(2600 * time.Millisecond)
 				r.mu.RLock()
+				if r.Phase != PhasePowersExecution || r.phaseSeq != seq {
+					r.mu.RUnlock()
+					return
+				}
 				targets := make([]string, 0)
 				for _, p := range r.Players {
 					if p.ID != leader.ID && p.IsAlive {
@@ -1117,26 +1473,21 @@ func (r *Room) checkBotAction() {
 
 				if len(targets) > 0 {
 					pick := targets[rand.Intn(len(targets))]
-					r.SetExpression(leader.ID, "pointing", "👉 İnfaz kararım sen!", pick)
+					r.SetExpression(leader.ID, "pointing", "👉 İnfaz kararım!", pick)
 					time.Sleep(1200 * time.Millisecond)
 					_ = r.ExecutePlayer(leader.ID, pick)
 				}
 			}
-
-		case PhaseSuspicionMarking:
-			// Oyuncunun ve botların çip koyması, parmakla işaret etmesi ve masayı incelemesi için 7 saniye bekle
-			time.Sleep(7 * time.Second)
-			r.FinishSuspicionMarking()
 		}
 	}()
 }
 
-// triggerBotTableGestures Botların masada sağa-sola bakması, parmakla hedef göstermesi ve şüphe çipi bırakması
-func (r *Room) triggerBotTableGestures(phase GamePhase) {
+// triggerBotTableGestures Botların her fazda sağa-sola bakması, parmakla işaret etmesi ve şüphe çipi bırakması
+func (r *Room) triggerBotTableGestures(phase GamePhase, seq uint64) {
 	go func() {
-		time.Sleep(600 * time.Millisecond)
+		time.Sleep(550 * time.Millisecond)
 		r.mu.Lock()
-		if r.Phase != phase || r.Phase == PhaseLobby || r.Phase == PhaseGameOver {
+		if r.Phase != phase || r.phaseSeq != seq || r.Phase == PhaseLobby || r.Phase == PhaseGameOver {
 			r.mu.Unlock()
 			return
 		}
@@ -1198,11 +1549,11 @@ func (r *Room) triggerBotTableGestures(phase GamePhase) {
 				if p.ID != leaderID {
 					if idx%2 == 0 && leaderID != "" {
 						p.Expression = "pointing"
-						p.Bubble = "👉 Ne çekti acaba?"
+						p.Bubble = "👉 Ne çekti?"
 						p.TargetID = leaderID
 					} else {
 						p.Expression = "look_left"
-						p.Bubble = "👀 Kartlar..."
+						p.Bubble = "🃏 Kartlar..."
 						p.TargetID = leaderID
 					}
 				}
@@ -1221,7 +1572,6 @@ func (r *Room) triggerBotTableGestures(phase GamePhase) {
 				}
 
 			case PhaseSuspicionMarking:
-				// Botlar şüphe veya güven çipi koysun ve şüpheliyi parmakla işaret etsin
 				if _, ok := r.Suspicions[p.ID]; !ok {
 					r.Suspicions[p.ID] = make(map[string]string)
 				}
@@ -1238,7 +1588,7 @@ func (r *Room) triggerBotTableGestures(phase GamePhase) {
 						r.Suspicions[p.ID][target] = "SUSPECT"
 						if idx%2 == 0 {
 							p.Expression = "pointing"
-							p.Bubble = "👉 Kesin şüpheli!"
+							p.Bubble = "👉 Şüpheli!"
 							p.TargetID = target
 						} else {
 							p.Expression = "eureka"

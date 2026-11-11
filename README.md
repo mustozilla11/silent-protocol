@@ -1,6 +1,13 @@
-# 🛡️ Sessiz Protokol (Silent Protocol) - v0.6.0
+# 🛡️ Sessiz Protokol (Silent Protocol) - v0.7.0
 
 > Sesli veya yazılı sohbet içermeyen; tamamen **"işaretler, iddialar ve veri logları"** üzerinden oynanan sessiz bir **3D masabaşı sosyal çıkarım (social deduction)** oyunu.
+
+---
+
+## 📌 v0.7.0 Düzeltmeleri & İyileştirmeleri: Aydınlık 3D Stüdyo, Tam WebSocket Senkronu & Gerçek +Z Yönlü İşaretler
+- **Aydınlık ve Net 3D Sahne**: Three.js fiziksel ışık sönümlemesi düzeltildi (`decay=0`, `HemisphereLight`, ön yüz ve kenar dolgu ışıkları, ACES Filmic ton haritalaması). Siyah (Noir) ve Beyaz (Studio) temalar artık hem arayüzde hem 3D ortamda yüksek netlikte çalışır.
+- **Karakter Yönü & Gerçek 3D Parmakla İşaret Düzeltmesi**: Three.js `Object3D.lookAt` `+Z` yönelimine göre tüm karakter gövdeleri, yüzler, kaş/ağız mimikleri, sandalyeler ve kollar yeniden hizalandı. Botlar ve oyuncu gerçekten birbirinin gözünün içine bakarak ve kol+işaret parmağını uzatarak işaret eder.
+- **Dokulu 3D Kartlar, Şüphe Çipleri & Sunucu Zamanlayıcısı**: Masadaki yasa yuvaları, deste/ıskarta, açılan/elenen kartlar Canvas dokularıyla okunaklı hale getirildi. Masadaki şüphe/güven çipleri artık koltukların önünde 3D poker çipi olarak dizilir ve her faz 10 saniyelik gerçek sunucu zamanlayıcısına bağlandı.
 
 ---
 

@@ -5,6 +5,7 @@ import (
 	"log"
 	"net/http"
 	"sync"
+	"time"
 
 	"github.com/gorilla/websocket"
 	"silent-protocol/server/game"
@@ -66,6 +67,16 @@ func (h *Hub) Run() {
 				close(client.send)
 				if client.playerID != "" {
 					delete(h.playerMap, client.playerID)
+					pid := client.playerID
+					go func() {
+						time.Sleep(2500 * time.Millisecond)
+						h.mu.Lock()
+						_, active := h.playerMap[pid]
+						h.mu.Unlock()
+						if !active {
+							h.room.RemoveLobbyPlayer(pid)
+						}
+					}()
 				}
 			}
 			h.mu.Unlock()
@@ -142,6 +153,15 @@ func (c *Client) readPump() {
 			c.hub.mu.Unlock()
 			c.hub.BroadcastState()
 			log.Printf("Oyuncu katıldı: %s (%s)", player.Name, player.ID)
+
+		case "add_bot":
+			c.hub.room.AddBot()
+
+		case "remove_bot":
+			c.hub.room.RemoveBot(in.TargetID)
+
+		case "return_lobby":
+			c.hub.room.ReturnToLobby()
 
 		case "start_game":
 			_ = c.hub.room.StartGameWithBots()

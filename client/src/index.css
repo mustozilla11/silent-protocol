@@ -3,6 +3,7 @@
 @tailwind utilities;
 
 @layer base {
+  html,
   body {
     @apply antialiased select-none transition-colors duration-300 font-sans;
     margin: 0;
@@ -10,65 +11,100 @@
   }
 }
 
-/* TEMA: KOYU NOİR MASA (AHŞAP & KEÇE) */
+/* SİYAH TEMA (NOİR AHŞAP & PİRİNÇ) */
+[data-theme="dark"],
 body.theme-dark {
-  background-color: #0b0c0e;
-  color: #e2e4e9;
+  background-color: #121110;
+  color: #f4f4f5;
 }
 
-/* TEMA: BEYAZ / ARŞİV BELGESİ (MONOKROMATİK KLASİK) */
+/* BEYAZ TEMA (MONOKROMATİK KLASİK ARŞİV) */
+[data-theme="light"],
 body.theme-light {
   background-color: #f4f4f5;
   color: #18181b;
 }
 
-/* OVAL MASA EFEKTİ */
-.poker-table-dark {
-  background: radial-gradient(ellipse at center, #1e2229 0%, #15171c 65%, #0f1013 100%);
-  border: 12px solid #2a221b; /* Ahşap kenarlık */
-  box-shadow: 
-    inset 0 0 40px rgba(0, 0, 0, 0.8),
-    0 12px 35px rgba(0, 0, 0, 0.7);
+.sp-card {
+  transition: background-color 0.25s, border-color 0.25s, color 0.25s;
 }
 
-.poker-table-light {
-  background: radial-gradient(ellipse at center, #ffffff 0%, #f1f3f6 65%, #e2e5eb 100%);
-  border: 12px solid #3f3f46; /* Koyu antrasit kenarlık */
-  box-shadow: 
-    inset 0 0 30px rgba(0, 0, 0, 0.1),
-    0 12px 30px rgba(0, 0, 0, 0.15);
+[data-theme="dark"] .sp-card {
+  background-color: #1c1a17;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  color: #f4f4f5;
+}
+
+[data-theme="light"] .sp-card {
+  background-color: #ffffff;
+  border: 1px solid #d4d4d8;
+  color: #18181b;
+}
+
+[data-theme="dark"] .sp-text-muted {
+  color: #a1a1aa;
+}
+
+[data-theme="light"] .sp-text-muted {
+  color: #52525b;
+}
+
+.sp-btn-primary {
+  background-color: #d97706;
+  color: #111827;
+  transition: background-color 0.15s, transform 0.1s;
+}
+.sp-btn-primary:hover:not(:disabled) {
+  background-color: #f59e0b;
+}
+
+[data-theme="dark"] .sp-btn-secondary {
+  background-color: #272521;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  color: #f4f4f5;
+}
+[data-theme="dark"] .sp-btn-secondary:hover {
+  background-color: #35322d;
+}
+
+[data-theme="light"] .sp-btn-secondary {
+  background-color: #e4e4e7;
+  border: 1px solid #d4d4d8;
+  color: #18181b;
+}
+[data-theme="light"] .sp-btn-secondary:hover {
+  background-color: #d4d4d8;
 }
 
 /* ÇELİŞKİ MÜHÜRÜ DAMGASI */
 @keyframes stamp-drop {
-  0% { transform: scale(3) rotate(-15deg); opacity: 0; }
-  60% { transform: scale(0.95) rotate(-5deg); opacity: 1; }
-  100% { transform: scale(1) rotate(-8deg); opacity: 1; }
+  0% { transform: scale(2.2) rotate(-12deg); opacity: 0; }
+  60% { transform: scale(0.96) rotate(-3deg); opacity: 1; }
+  100% { transform: scale(1) rotate(0deg); opacity: 1; }
 }
 
 .stamp-conflict {
   animation: stamp-drop 0.4s cubic-bezier(0.175, 0.885, 0.32, 1.275) forwards;
 }
 
-/* PUL VE KART TİTREMESİ */
 @keyframes suspense-pulse {
-  0%, 100% { box-shadow: 0 0 0 0 rgba(220, 38, 38, 0.4); }
+  0%, 100% { box-shadow: 0 0 0 0 rgba(220, 38, 38, 0.45); }
   50% { box-shadow: 0 0 0 8px rgba(220, 38, 38, 0); }
 }
 
 .pulse-danger {
-  animation: suspense-pulse 1.5s infinite;
+  animation: suspense-pulse 1.4s infinite;
 }
 
 /* Kaydırma Çubuğu */
 ::-webkit-scrollbar {
-  width: 5px;
-  height: 5px;
+  width: 6px;
+  height: 6px;
 }
 ::-webkit-scrollbar-track {
   background: transparent;
 }
 ::-webkit-scrollbar-thumb {
-  background: rgba(120, 120, 120, 0.3);
+  background: rgba(140, 140, 140, 0.35);
   border-radius: 9999px;
 }
