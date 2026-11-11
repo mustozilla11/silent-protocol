@@ -7,7 +7,7 @@ import (
 	"time"
 )
 
-const AppVersion = "v1.2.0"
+const AppVersion = "v1.2.1"
 const DefaultPhaseSeconds = 10
 
 type Room struct {

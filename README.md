@@ -1,6 +1,12 @@
-# 🎲 Secret Hitler 3D (Silent Protocol) - v1.2.0
+# 🎲 Secret Hitler 3D (Silent Protocol) - v1.2.1
 
 > Strict **"Headless Engine"** mimarisiyle ayrıştırılmış, Vite + TypeScript + Vanilla Three.js + TailwindCSS tabanlı tam ekran **3D Secret Hitler** masaüstü web oyunu (`5–10 kişilik tam resmi kurallar`).
+
+---
+
+## 📌 v1.2.1 Daha Sakin Akış & Manuel Adım Modu
+- **Çok Daha Rahat Varsayılan Süreler**: Bot oylamaları her `1.8 sn` arayla tek tek gelir, oylama ve politika sonuçlarından sonra **+5 sn** okuma duraklaması eklenir, tartışma/çelişki ekranları `8.5–11.5 sn` bekler.
+- **`✋ Manuel (Tıkla İlerle)` Modu**: Sağ üst hız menüsünden **`✋ Manuel`** seçildiğinde hiçbir bot adımı kendiliğinden geçmez; her hamle **`▶ Sonraki Adım`** butonuyla senin kontrolünde ilerler.
 
 ---
 

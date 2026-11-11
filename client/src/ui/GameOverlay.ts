@@ -1,8 +1,8 @@
 import type { GameEngine, PlayerView, Policy } from '../engine/index.ts';
 
-type PaceMode = 'slow' | 'normal' | 'fast';
+type PaceMode = 'slow' | 'normal' | 'manual' | 'fast';
 
-const PACE_MULTIPLIER: Record<PaceMode, number> = {
+const PACE_MULTIPLIER: Record<Exclude<PaceMode, 'manual'>, number> = {
   slow: 1.65,
   normal: 1.0,
   fast: 0.35,
@@ -104,15 +104,19 @@ export class GameOverlay {
 
     const president = this.engine.getCurrentPresident();
     const chancellor = s.players.find((p) => p.id === s.chancellorId);
-    const mult = PACE_MULTIPLIER[this.paceMode];
+    const mult = this.paceMode === 'manual' ? 1.0 : PACE_MULTIPLIER[this.paceMode];
 
-    // Oylama veya yasa sonucu yeni açıldıysa oyuncunun görebilmesi için ek okuma payı
-    const postEventBonus = this.justResolvedElection || this.justEnactedPolicy ? 2400 : 0;
+    // Oylama sonucu veya yasa açıldıysa masadakileri incelemek için geniş okuma payı
+    const postElectionBonus = this.justResolvedElection ? 5000 : 0;
+    const postPolicyBonus = this.justEnactedPolicy ? 4000 : 0;
+    const postEventBonus = Math.max(postElectionBonus, postPolicyBonus);
 
     if (s.phase === 'ELECTION_NOMINATION' && !president.isHuman) {
       return {
-        delayMs: Math.round((2600 + postEventBonus) * mult),
-        label: `Başkan ${president.name} aday düşünüyor`,
+        delayMs: Math.round((4500 + postEventBonus) * mult),
+        label: this.justResolvedElection
+          ? `Son oylama gösteriliyor — Başkan ${president.name} hazırlanıyor`
+          : `Başkan ${president.name} Şansölye adayını düşünüyor`,
       };
     }
 
@@ -120,28 +124,30 @@ export class GameOverlay {
       const nextBot = this.engine.getAlivePlayers().find((p) => !p.isHuman && !s.votes[p.id]);
       if (!nextBot) return null;
       return {
-        delayMs: Math.round(750 * mult),
-        label: `${nextBot.name} oy kullanıyor`,
+        delayMs: Math.round(1800 * mult),
+        label: `${nextBot.name} oyunu hazırlıyor`,
       };
     }
 
     if (s.phase === 'LEGISLATIVE_PRESIDENT' && !president.isHuman) {
       return {
-        delayMs: Math.round((3000 + postEventBonus) * mult),
-        label: `Başkan ${president.name} 3 kartı inceliyor`,
+        delayMs: Math.round((5000 + postElectionBonus) * mult),
+        label: this.justResolvedElection
+          ? `Oylama sonucu açıklandı — Başkan ${president.name} 3 kart çekiyor`
+          : `Başkan ${president.name} 3 politika kartını inceliyor`,
       };
     }
 
     if (s.phase === 'LEGISLATIVE_CHANCELLOR' && chancellor && !chancellor.isHuman) {
       return {
-        delayMs: Math.round(3000 * mult),
-        label: `Şansölye ${chancellor.name} 2 kartı inceliyor`,
+        delayMs: Math.round(5200 * mult),
+        label: `Şansölye ${chancellor.name} gelen 2 kartı inceliyor`,
       };
     }
 
     if (s.phase === 'LEGISLATIVE_VETO_RESPONSE' && !president.isHuman) {
       return {
-        delayMs: Math.round(2800 * mult),
+        delayMs: Math.round(5000 * mult),
         label: `Başkan ${president.name} Veto talebini değerlendiriyor`,
       };
     }
@@ -150,14 +156,14 @@ export class GameOverlay {
       const c = s.currentClaim;
       if (!c.presidentClaimed && !president.isHuman) {
         return {
-          delayMs: Math.round(2400 * mult),
-          label: `Başkan ${president.name} beyan hazırlıyor`,
+          delayMs: Math.round(4200 * mult),
+          label: `Başkan ${president.name} kart beyanını hazırlıyor`,
         };
       }
       if (!c.chancellorClaimed && chancellor && !chancellor.isHuman) {
         return {
-          delayMs: Math.round(2400 * mult),
-          label: `Şansölye ${chancellor.name} yanıtlıyor`,
+          delayMs: Math.round(4200 * mult),
+          label: `Şansölye ${chancellor.name} beyanını yanıtlıyor`,
         };
       }
       if (
@@ -167,12 +173,12 @@ export class GameOverlay {
         chancellor &&
         !chancellor.isHuman
       ) {
-        const readPause = c.hasConflict ? 5200 : 3800;
+        const readPause = c.hasConflict ? 11500 : 8500;
         return {
           delayMs: Math.round(readPause * mult),
           label: c.hasConflict
-            ? '⚡ Çelişki inceleniyor (sonraki tura geçilecek)'
-            : 'Beyanlar okunuyor (sonraki tura geçilecek)',
+            ? '⚡ Çelişki masada — inceleme süresi'
+            : 'Beyanlar masada — okuma süresi',
         };
       }
       return null;
@@ -180,29 +186,29 @@ export class GameOverlay {
 
     if (s.phase === 'EXECUTIVE_INVESTIGATE' && !president.isHuman) {
       return {
-        delayMs: Math.round(3200 * mult),
+        delayMs: Math.round(6000 * mult),
         label: `Başkan ${president.name} soruşturma hedefi seçiyor`,
       };
     }
 
     if (s.phase === 'EXECUTIVE_SPECIAL_ELECTION' && !president.isHuman) {
       return {
-        delayMs: Math.round(3200 * mult),
+        delayMs: Math.round(6000 * mult),
         label: `Başkan ${president.name} Özel Seçim adayı seçiyor`,
       };
     }
 
     if (s.phase === 'EXECUTIVE_PEEK' && !president.isHuman) {
       return {
-        delayMs: Math.round(3400 * mult),
-        label: `Başkan ${president.name} üst 3 kartı inceliyor`,
+        delayMs: Math.round(6000 * mult),
+        label: `Başkan ${president.name} destenin üst 3 kartını inceliyor`,
       };
     }
 
     if (s.phase === 'EXECUTIVE_EXECUTION' && !president.isHuman) {
       return {
-        delayMs: Math.round(3600 * mult),
-        label: `Başkan ${president.name} idam kararı veriyor`,
+        delayMs: Math.round(6500 * mult),
+        label: `Başkan ${president.name} idam kararını düşünüyor`,
       };
     }
 
@@ -227,6 +233,14 @@ export class GameOverlay {
       this.pendingUntilMs = 0;
       this.pendingTotalMs = 0;
       this.pendingStatusLabel = '';
+      this.updateCountdownUI();
+      return;
+    }
+
+    if (this.paceMode === 'manual') {
+      this.pendingUntilMs = 0;
+      this.pendingTotalMs = 0;
+      this.pendingStatusLabel = `✋ Manuel mod: ${cfg.label} ("▶ Sonraki Adım" tıkla)`;
       this.updateCountdownUI();
       return;
     }
@@ -263,6 +277,12 @@ export class GameOverlay {
 
     if (this.isPaused) {
       if (this.countdownTextEl) this.countdownTextEl.textContent = '⏸ Duraklatıldı';
+      if (this.countdownBarEl) this.countdownBarEl.style.width = '100%';
+      return;
+    }
+
+    if (this.paceMode === 'manual' && this.pendingStatusLabel) {
+      if (this.countdownTextEl) this.countdownTextEl.textContent = this.pendingStatusLabel;
       if (this.countdownBarEl) this.countdownBarEl.style.width = '100%';
       return;
     }
@@ -469,8 +489,9 @@ export class GameOverlay {
       'px-2 py-2 rounded-xl bg-stone-900/90 border border-stone-700 text-xs font-bold text-stone-200 shadow-xl backdrop-blur-md cursor-pointer focus:outline-none focus:border-amber-500';
     paceSelect.title = 'Bot & Oyun Akış Hızı';
     [
-      ['slow', '🐢 Yavaş'],
-      ['normal', '⚖️ Normal'],
+      ['manual', '✋ Manuel (Tıkla İlerle)'],
+      ['slow', '🐢 Çok Yavaş'],
+      ['normal', '⚖️ Rahat (Varsayılan)'],
       ['fast', '⚡ Hızlı'],
     ].forEach(([val, lbl]) => {
       const opt = document.createElement('option');
@@ -551,8 +572,8 @@ export class GameOverlay {
     const skipBtn = document.createElement('button');
     skipBtn.type = 'button';
     skipBtn.className =
-      'shrink-0 px-2 py-1 rounded-lg bg-stone-800 hover:bg-stone-700 border border-stone-600 text-[10px] font-bold text-stone-200 cursor-pointer';
-    skipBtn.textContent = '⏭ İleri Al';
+      'shrink-0 px-2.5 py-1 rounded-lg bg-amber-500 hover:bg-amber-400 text-[10px] font-black text-stone-950 cursor-pointer';
+    skipBtn.textContent = this.paceMode === 'manual' ? '▶ Sonraki Adım' : '⏭ Geç';
     skipBtn.addEventListener('click', () => this.triggerNextBotImmediately());
 
     topRow.append(statusText, skipBtn);
