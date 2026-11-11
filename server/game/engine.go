@@ -7,7 +7,7 @@ import (
 	"time"
 )
 
-const AppVersion = "v0.5.0"
+const AppVersion = "v0.6.0"
 
 type Room struct {
 	mu           sync.RWMutex
@@ -533,18 +533,53 @@ func (r *Room) checkClaims() {
 			r.CurrentClaim.ConflictNote = fmt.Sprintf("ÇELİŞKİ! Lider %d Mavi/%d Kırmızı verdiğini, Ortak ise %d Mavi/%d Kırmızı aldığını iddia ediyor!", lPassedBlue, lPassedRed, pRecBlue, pRecRed)
 			r.addLog("⚡ DİKKAT: BEYANLARDA ÇELİŞKİ TESPİT EDİLDİ! BİRİ YALAN SÖYLÜYOR!", "conflict")
 
-			reactions := []string{"Ha?!", "Aha!", "Hmm...", "Gözüm üstünde!"}
+			leader := r.getCurrentLeader()
+			leaderID := ""
+			if leader != nil {
+				leaderID = leader.ID
+			}
+
+			reactions := []string{"Ha?!", "Aha!", "Hmm...", "👉 Yalan!"}
 			for i, p := range r.Players {
-				if p.IsBot {
-					p.Expression = "surprised"
-					p.Bubble = reactions[i%len(reactions)]
-					p.TargetID = r.PartnerID
+				if p.IsBot && p.IsAlive {
+					if p.ID == leaderID && r.PartnerID != "" {
+						p.Expression = "pointing"
+						p.Bubble = "👉 O yalan söylüyor!"
+						p.TargetID = r.PartnerID
+					} else if p.ID == r.PartnerID && leaderID != "" {
+						p.Expression = "pointing"
+						p.Bubble = "👉 Lider yalan söylüyor!"
+						p.TargetID = leaderID
+					} else if i%2 == 0 && r.PartnerID != "" {
+						p.Expression = "pointing"
+						p.Bubble = "👉 Şüpheli!"
+						p.TargetID = r.PartnerID
+					} else {
+						p.Expression = "surprised"
+						p.Bubble = reactions[i%len(reactions)]
+						p.TargetID = leaderID
+					}
 				}
 			}
 		} else {
 			r.CurrentClaim.HasConflict = false
 			r.CurrentClaim.ConflictNote = "Beyanlar birbiriyle örtüşüyor."
 			r.addLog("Beyanlar tutarlı. Açık bir çelişki bulunamadı.", "info")
+
+			if r.CurrentClaim.PartnerEnacted == PolicyRed {
+				for i, p := range r.Players {
+					if p.IsBot && p.IsAlive && p.ID != r.PartnerID {
+						if i%2 == 0 {
+							p.Expression = "thinking"
+							p.Bubble = "Hmm..."
+							p.TargetID = r.PartnerID
+						} else {
+							p.Expression = "look_left"
+							p.Bubble = "👀..."
+						}
+					}
+				}
+			}
 		}
 
 		// Şimdi yetki kontrolü yap: Son yasa Kırmızı ise yetki verilebilir mi?
@@ -649,15 +684,69 @@ func (r *Room) ToggleSuspicion(sourceID, targetID, chipType string) {
 // SetExpression Oyuncunun jest, mimik ve baloncuk ifadesini günceller
 func (r *Room) SetExpression(playerID, expr, bubble, targetID string) {
 	r.mu.Lock()
-	defer r.mu.Unlock()
 
 	p := r.getPlayerByID(playerID)
+	var pointedBot *Player
 	if p != nil {
+		// Eğer işaret etme seçildiyse ve hedef boşsa otomatik mantıklı bir hedef seç
+		if expr == "pointing" && targetID == "" {
+			if r.PartnerID != "" && r.PartnerID != playerID {
+				targetID = r.PartnerID
+			} else if leader := r.getCurrentLeader(); leader != nil && leader.ID != playerID {
+				targetID = leader.ID
+			} else {
+				for _, other := range r.Players {
+					if other.ID != playerID && other.IsAlive {
+						targetID = other.ID
+						break
+					}
+				}
+			}
+		}
+
 		p.Expression = expr
 		p.Bubble = bubble
 		p.TargetID = targetID
+
+		if expr == "pointing" && targetID != "" {
+			target := r.getPlayerByID(targetID)
+			if target != nil {
+				r.addLog(fmt.Sprintf("🫵 %s parmağıyla %s oyuncusunu işaret etti! (%s)", p.Name, target.Name, bubble), "info")
+				if target.IsBot && target.IsAlive {
+					pointedBot = target
+				}
+			}
+		}
 	}
+	r.mu.Unlock()
 	r.notifyChange()
+
+	// İşaret edilen bot kısa süre sonra tepki versin (şaşırma, geri işaret etme veya sağa sola bakma)
+	if pointedBot != nil {
+		go func(bID, pointerID, pointerName string) {
+			time.Sleep(1100 * time.Millisecond)
+			r.mu.Lock()
+			bot := r.getPlayerByID(bID)
+			if bot != nil && bot.IsAlive {
+				roll := rand.Intn(3)
+				if roll == 0 {
+					bot.Expression = "surprised"
+					bot.Bubble = "Ha?! Ben mi?!"
+					bot.TargetID = pointerID
+				} else if roll == 1 {
+					bot.Expression = "pointing"
+					bot.Bubble = fmt.Sprintf("👉 Asıl %s!", pointerName)
+					bot.TargetID = pointerID
+				} else {
+					bot.Expression = "thinking"
+					bot.Bubble = "Hmm..."
+					bot.TargetID = pointerID
+				}
+			}
+			r.mu.Unlock()
+			r.notifyChange()
+		}(pointedBot.ID, playerID, p.Name)
+	}
 }
 
 // FinishSuspicionMarking Sonraki tura geç
@@ -840,10 +929,10 @@ func (r *Room) GetPrivateView(playerID string) PrivatePlayerView {
 	return view
 }
 
-// --- BOT YAPAY ZEKASI (RULES-BASED BOT SIMULATION) ---
+// --- BOT YAPAY ZEKASI (RULES-BASED BOT SIMULATION & GESTURES) ---
 func (r *Room) checkBotAction() {
 	go func() {
-		time.Sleep(1200 * time.Millisecond) // İlk gözlem payı
+		time.Sleep(1000 * time.Millisecond) // İlk gözlem payı
 
 		r.mu.RLock()
 		phase := r.Phase
@@ -852,11 +941,15 @@ func (r *Room) checkBotAction() {
 		partner := r.getPlayerByID(partnerID)
 		r.mu.RUnlock()
 
+		// Faz başında botların canlı masa mimikleri ve parmakla işaret etme davranışları
+		r.triggerBotTableGestures(phase)
+
 		switch phase {
 		case PhaseNomination:
 			if leader != nil && leader.IsBot && leader.IsAlive {
-				// Lider bot 2.5 saniye düşünsün
-				time.Sleep(2500 * time.Millisecond)
+				// Lider bot düşünürken masaya baksın
+				r.SetExpression(leader.ID, "thinking", "Hmm... Kimi seçsem?", "")
+				time.Sleep(2400 * time.Millisecond)
 				r.mu.RLock()
 				candidates := make([]string, 0)
 				for _, p := range r.Players {
@@ -868,6 +961,8 @@ func (r *Room) checkBotAction() {
 
 				if len(candidates) > 0 {
 					pick := candidates[rand.Intn(len(candidates))]
+					r.SetExpression(leader.ID, "pointing", "👉 Seni aday gösteriyorum!", pick)
+					time.Sleep(700 * time.Millisecond)
 					_ = r.NominatePartner(leader.ID, pick)
 				}
 			}
@@ -881,7 +976,7 @@ func (r *Room) checkBotAction() {
 						botRole := p.Role
 						go func(bID string, bRole Role) {
 							// Her bot masada farklı zamanda düşünsün (2 ila 6 saniye)
-							delay := time.Duration(1800+rand.Intn(4200)) * time.Millisecond
+							delay := time.Duration(1800+rand.Intn(4000)) * time.Millisecond
 							time.Sleep(delay)
 							vote := "YES"
 							if bRole == RoleProtector {
@@ -900,8 +995,9 @@ func (r *Room) checkBotAction() {
 
 		case PhaseLegislateLeader:
 			if leader != nil && leader.IsBot {
-				// Lider bot kartları 3 saniye incelesin
-				time.Sleep(3000 * time.Millisecond)
+				r.SetExpression(leader.ID, "thinking", "Hmm... Kartlara bakalım", "")
+				// Lider bot kartları 3.2 saniye incelesin
+				time.Sleep(3200 * time.Millisecond)
 				r.mu.RLock()
 				cards := r.LeaderCards
 				role := leader.Role
@@ -928,6 +1024,7 @@ func (r *Room) checkBotAction() {
 
 		case PhaseLegislatePartner:
 			if partner != nil && partner.IsBot {
+				r.SetExpression(partner.ID, "thinking", "Hmm... Hangi yasayı seçsem?", "")
 				// Ortak bot 3.5 saniye düşünsün
 				time.Sleep(3500 * time.Millisecond)
 				r.mu.RLock()
@@ -955,7 +1052,7 @@ func (r *Room) checkBotAction() {
 			}
 
 		case PhaseClaiming:
-			time.Sleep(2000 * time.Millisecond)
+			time.Sleep(2200 * time.Millisecond)
 			r.mu.RLock()
 			claim := r.CurrentClaim
 			r.mu.RUnlock()
@@ -986,7 +1083,7 @@ func (r *Room) checkBotAction() {
 
 			// Ortak botsa beyan ver
 			if partner != nil && partner.IsBot && !claim.PartnerClaimed {
-				time.Sleep(1500 * time.Millisecond)
+				time.Sleep(1600 * time.Millisecond)
 				r.mu.RLock()
 				pCards := r.PartnerCards
 				r.mu.RUnlock()
@@ -1000,13 +1097,15 @@ func (r *Room) checkBotAction() {
 
 		case PhasePowersPeek:
 			if leader != nil && leader.IsBot {
-				time.Sleep(3000 * time.Millisecond)
+				r.SetExpression(leader.ID, "eureka", "Aha! Desteyi gördüm!", "")
+				time.Sleep(3200 * time.Millisecond)
 				_ = r.ClosePeek(leader.ID)
 			}
 
 		case PhasePowersExecution:
 			if leader != nil && leader.IsBot {
-				time.Sleep(3500 * time.Millisecond)
+				r.SetExpression(leader.ID, "thinking", "Hmm... Kimi infaz etmeliyim?", "")
+				time.Sleep(2500 * time.Millisecond)
 				r.mu.RLock()
 				targets := make([]string, 0)
 				for _, p := range r.Players {
@@ -1018,15 +1117,146 @@ func (r *Room) checkBotAction() {
 
 				if len(targets) > 0 {
 					pick := targets[rand.Intn(len(targets))]
+					r.SetExpression(leader.ID, "pointing", "👉 İnfaz kararım sen!", pick)
+					time.Sleep(1200 * time.Millisecond)
 					_ = r.ExecutePlayer(leader.ID, pick)
 				}
 			}
 
 		case PhaseSuspicionMarking:
-			// Oyuncunun çip koyması ve masayı incelemesi için 6 saniye bekle
-			time.Sleep(6 * time.Second)
+			// Oyuncunun ve botların çip koyması, parmakla işaret etmesi ve masayı incelemesi için 7 saniye bekle
+			time.Sleep(7 * time.Second)
 			r.FinishSuspicionMarking()
 		}
+	}()
+}
+
+// triggerBotTableGestures Botların masada sağa-sola bakması, parmakla hedef göstermesi ve şüphe çipi bırakması
+func (r *Room) triggerBotTableGestures(phase GamePhase) {
+	go func() {
+		time.Sleep(600 * time.Millisecond)
+		r.mu.Lock()
+		if r.Phase != phase || r.Phase == PhaseLobby || r.Phase == PhaseGameOver {
+			r.mu.Unlock()
+			return
+		}
+
+		leader := r.getCurrentLeader()
+		leaderID := ""
+		if leader != nil {
+			leaderID = leader.ID
+		}
+		partnerID := r.PartnerID
+
+		aliveIDs := make([]string, 0)
+		for _, p := range r.Players {
+			if p.IsAlive {
+				aliveIDs = append(aliveIDs, p.ID)
+			}
+		}
+
+		for idx, p := range r.Players {
+			if !p.IsBot || !p.IsAlive {
+				continue
+			}
+
+			switch phase {
+			case PhaseNomination:
+				if p.ID != leaderID {
+					modes := []struct{ e, b string }{
+						{"look_left", "👈..."},
+						{"look_right", "...👉"},
+						{"thinking", "Hmm..."},
+						{"pointing", "👉 Beni seç!"},
+					}
+					m := modes[(idx+r.Round)%len(modes)]
+					p.Expression = m.e
+					p.Bubble = m.b
+					if m.e == "pointing" && leaderID != "" {
+						p.TargetID = leaderID
+					} else {
+						p.TargetID = ""
+					}
+				}
+
+			case PhaseVoting:
+				if idx%3 == 0 && partnerID != "" && partnerID != p.ID {
+					p.Expression = "pointing"
+					p.Bubble = "👉 Emin miyiz?"
+					p.TargetID = partnerID
+				} else if idx%2 == 0 {
+					p.Expression = "thinking"
+					p.Bubble = "Hmm..."
+					p.TargetID = partnerID
+				} else {
+					p.Expression = "look_right"
+					p.Bubble = "👀"
+					p.TargetID = ""
+				}
+
+			case PhaseLegislateLeader:
+				if p.ID != leaderID {
+					if idx%2 == 0 && leaderID != "" {
+						p.Expression = "pointing"
+						p.Bubble = "👉 Ne çekti acaba?"
+						p.TargetID = leaderID
+					} else {
+						p.Expression = "look_left"
+						p.Bubble = "👀 Kartlar..."
+						p.TargetID = leaderID
+					}
+				}
+
+			case PhaseLegislatePartner:
+				if p.ID != partnerID {
+					if idx%2 == 1 && partnerID != "" {
+						p.Expression = "pointing"
+						p.Bubble = "👉 Mavi bas!"
+						p.TargetID = partnerID
+					} else {
+						p.Expression = "thinking"
+						p.Bubble = "Hmm..."
+						p.TargetID = partnerID
+					}
+				}
+
+			case PhaseSuspicionMarking:
+				// Botlar şüphe veya güven çipi koysun ve şüpheliyi parmakla işaret etsin
+				if _, ok := r.Suspicions[p.ID]; !ok {
+					r.Suspicions[p.ID] = make(map[string]string)
+				}
+				target := partnerID
+				if target == "" || target == p.ID {
+					target = leaderID
+				}
+				if (target == "" || target == p.ID) && len(aliveIDs) > 0 {
+					target = aliveIDs[(idx+1)%len(aliveIDs)]
+				}
+
+				if target != "" && target != p.ID {
+					if r.CurrentClaim != nil && (r.CurrentClaim.HasConflict || r.CurrentClaim.PartnerEnacted == PolicyRed) {
+						r.Suspicions[p.ID][target] = "SUSPECT"
+						if idx%2 == 0 {
+							p.Expression = "pointing"
+							p.Bubble = "👉 Kesin şüpheli!"
+							p.TargetID = target
+						} else {
+							p.Expression = "eureka"
+							p.Bubble = "Aha! Çözdüm!"
+							p.TargetID = target
+						}
+					} else if r.CurrentClaim != nil && r.CurrentClaim.PartnerEnacted == PolicyBlue {
+						r.Suspicions[p.ID][target] = "TRUSTED"
+						p.Expression = "eureka"
+						p.Bubble = "👍 Güvenilir!"
+						p.TargetID = target
+					}
+				}
+			}
+		}
+
+		r.mu.Unlock()
+		r.notifyChange()
 	}()
 }
 

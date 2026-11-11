@@ -1,6 +1,20 @@
-# 🛡️ Sessiz Protokol (Silent Protocol) - v0.5.0
+# 🛡️ Sessiz Protokol (Silent Protocol) - v0.6.0
 
 > Sesli veya yazılı sohbet içermeyen; tamamen **"işaretler, iddialar ve veri logları"** üzerinden oynanan sessiz bir **3D masabaşı sosyal çıkarım (social deduction)** oyunu.
+
+---
+
+## 📌 v0.6.0 Yenilikleri: Tam Ekran 3D Sahne, Gerçek 3D Parmakla İşaret Etme & Dinamik Kart Kamerası
+- **Tam Ekran (`100vw x 100vh`) 3D Oyun Alanı**:
+  - Oyun başladığı anda 3D masa tüm ekranı kaplar; karakterler, masa ve kartlar sinematik bir bütünlük içinde görünür.
+- **Sağ Altta Birleşik Kumanda, Mimik & Kayıt Paneli**:
+  - Tüm oyun içi kararlar (aday gösterme, oylama, kart seçimi, beyanlar), hedef oyuncu seçimi, mimik/bakış butonları (`🤔 Hmm...`, `😲 Ha?!`, `💡 Aha!`, `👈 Sola Bak`, `👉 Sağa Bak`, `🫵 İşaret Et`), şüphe/güven çipleri ve canlı masa kayıtları sağ alttaki tek bir şık panelde toplandı.
+- **Gerçek 3D Kol, El ve İşaret Parmağı (3D Finger Pointing)**:
+  - Bir oyuncuyu işaret ettiğinizde veya sahnede üzerine tıkladığınızda karakterin 3D kolu ve işaret parmağı doğrudan hedef oyuncuya doğru uzanır, kafa o yöne döner ve hedef oyuncunun altında vurgu halkası ile işaret çizgisi belirir.
+  - Botlar da tüm aşamalarda birbirlerini parmakla işaret edebilir, sağa/sola bakabilir, mimik yapabilir ve şüphe çipi bırakabilir.
+- **Masadaki 3D Kartlar & Otomatik Masa Odaklı Kamera**:
+  - Lider 3 kart çektiğinde veya Ortağa 2 kart uzattığında kartlar masanın ortasında 3D olarak hareket eder ve açılır.
+  - Kartlarla ilgili bir işlem olduğunda (`LEGISLATE_LEADER`, `LEGISLATE_PARTNER`, `POWERS_PEEK`) 3D kamera otomatik olarak masanın ortasına doğru yaklaşır (`🎥 Otomatik / 🃏 Masa / 👥 Karakterler` kamera seçiciyle istenildiği an değiştirilebilir).
 
 ---
 
