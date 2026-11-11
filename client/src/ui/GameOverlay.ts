@@ -1,9 +1,22 @@
 import type { GameEngine, PlayerView, Policy } from '../engine/index.ts';
 
+type PaceMode = 'slow' | 'normal' | 'fast';
+
+const PACE_MULTIPLIER: Record<PaceMode, number> = {
+  slow: 1.65,
+  normal: 1.0,
+  fast: 0.35,
+};
+
+interface EventToast {
+  title: string;
+  detail: string;
+  tone: 'blue' | 'red' | 'amber' | 'emerald';
+}
+
 /**
  * 5–10 Kişilik Tam Kapasiteli Secret Hitler HTML/Tailwind UI Overlay Katmanı.
- * Tüm metinler, Gizli Kimlik Zarfı (Rol + Parti Kartı), Ja/Nein oylama, Veto,
- * Bağlılık Soruşturması, Özel Seçim, Tartışma Beyanları ve kayıtlar DOM üzerinde yaşar.
+ * Okunabilir tempo (adım adım bot oylaması, duraklatma, hız ayarı, sonuç özeti ve canlı sayaç) içerir.
  */
 export class GameOverlay {
   private readonly root: HTMLElement;
@@ -11,8 +24,23 @@ export class GameOverlay {
   private roleEnvelopeOpen = false;
   private logsOpen = true;
   private botTimerId: number | null = null;
-  private unsubscribe: (() => void) | null = null;
+  private countdownIntervalId: number | null = null;
+  private unsubscribers: Array<() => void> = [];
   private selectedCount: number;
+
+  // Tempo & Okunabilirlik Durumu
+  private paceMode: PaceMode = 'normal';
+  private isPaused = false;
+  private pendingUntilMs = 0;
+  private pendingTotalMs = 0;
+  private pendingStatusLabel = '';
+  private lastEventToast: EventToast | null = null;
+  private justResolvedElection = false;
+  private justEnactedPolicy = false;
+
+  // Geri sayım elemanları (tıklama/DOM yeniden çizimi bozmadan anlık güncellenir)
+  private countdownTextEl: HTMLElement | null = null;
+  private countdownBarEl: HTMLElement | null = null;
 
   // Beyan formu geçici seçimleri
   private claimDrawnLib = 1;
@@ -27,57 +55,230 @@ export class GameOverlay {
     this.root.className =
       'fixed inset-0 z-10 pointer-events-none flex flex-col justify-between p-3 sm:p-4 font-sans text-stone-100 select-none';
 
-    this.unsubscribe = this.engine.events.on('STATE_CHANGED', () => {
-      this.render();
-      this.scheduleBotsIfNeeded();
-    });
+    this.unsubscribers.push(
+      this.engine.events.on('ELECTION_RESOLVED', (res) => {
+        this.justResolvedElection = true;
+        this.lastEventToast = {
+          title: res.passed ? '✓ HÜKÜMET ONAYLANDI' : '✕ HÜKÜMET REDDEDİLDİ',
+          detail: `${res.jaCount} JA / ${res.neinCount} NEIN${
+            !res.passed ? ` • Seçim Sayacı: ${res.electionTracker}/3` : ''
+          }`,
+          tone: res.passed ? 'emerald' : 'red',
+        };
+      }),
+      this.engine.events.on('POLICY_ENACTED', (ev) => {
+        this.justEnactedPolicy = true;
+        this.lastEventToast = {
+          title:
+            ev.policy === 'LIBERAL'
+              ? '🔵 LİBERAL POLİTİKA GEÇTİ!'
+              : '🔴 FAŞİST POLİTİKA GEÇTİ!',
+          detail: `${
+            ev.viaChaos ? 'Kaos Kuralı (3/3 Red) ile indi! ' : ''
+          }Liberal: ${ev.liberalPolicies}/5 • Faşist: ${ev.fascistPolicies}/6`,
+          tone: ev.policy === 'LIBERAL' ? 'blue' : 'red',
+        };
+      }),
+      this.engine.events.on('PLAYER_EXECUTED', (ev) => {
+        const target = this.engine.getState().players.find((p) => p.id === ev.targetId);
+        this.lastEventToast = {
+          title: '💀 İDAM GERÇEKLEŞTİ',
+          detail: `${target?.name ?? 'Oyuncu'} masadan kaldırıldı.`,
+          tone: 'red',
+        };
+      }),
+      this.engine.events.on('STATE_CHANGED', () => {
+        this.render();
+        this.scheduleBotsIfNeeded();
+      })
+    );
 
+    this.countdownIntervalId = window.setInterval(() => this.updateCountdownUI(), 100);
     this.render();
     this.scheduleBotsIfNeeded();
   }
 
+  private computeBotStepConfig(): { delayMs: number; label: string } | null {
+    const s = this.engine.getState();
+    if (s.phase === 'GAME_OVER' || s.phase === 'SETUP') return null;
+
+    const president = this.engine.getCurrentPresident();
+    const chancellor = s.players.find((p) => p.id === s.chancellorId);
+    const mult = PACE_MULTIPLIER[this.paceMode];
+
+    // Oylama veya yasa sonucu yeni açıldıysa oyuncunun görebilmesi için ek okuma payı
+    const postEventBonus = this.justResolvedElection || this.justEnactedPolicy ? 2400 : 0;
+
+    if (s.phase === 'ELECTION_NOMINATION' && !president.isHuman) {
+      return {
+        delayMs: Math.round((2600 + postEventBonus) * mult),
+        label: `Başkan ${president.name} aday düşünüyor`,
+      };
+    }
+
+    if (s.phase === 'ELECTION_VOTING') {
+      const nextBot = this.engine.getAlivePlayers().find((p) => !p.isHuman && !s.votes[p.id]);
+      if (!nextBot) return null;
+      return {
+        delayMs: Math.round(750 * mult),
+        label: `${nextBot.name} oy kullanıyor`,
+      };
+    }
+
+    if (s.phase === 'LEGISLATIVE_PRESIDENT' && !president.isHuman) {
+      return {
+        delayMs: Math.round((3000 + postEventBonus) * mult),
+        label: `Başkan ${president.name} 3 kartı inceliyor`,
+      };
+    }
+
+    if (s.phase === 'LEGISLATIVE_CHANCELLOR' && chancellor && !chancellor.isHuman) {
+      return {
+        delayMs: Math.round(3000 * mult),
+        label: `Şansölye ${chancellor.name} 2 kartı inceliyor`,
+      };
+    }
+
+    if (s.phase === 'LEGISLATIVE_VETO_RESPONSE' && !president.isHuman) {
+      return {
+        delayMs: Math.round(2800 * mult),
+        label: `Başkan ${president.name} Veto talebini değerlendiriyor`,
+      };
+    }
+
+    if (s.phase === 'CLAIM_DEBATE' && s.currentClaim) {
+      const c = s.currentClaim;
+      if (!c.presidentClaimed && !president.isHuman) {
+        return {
+          delayMs: Math.round(2400 * mult),
+          label: `Başkan ${president.name} beyan hazırlıyor`,
+        };
+      }
+      if (!c.chancellorClaimed && chancellor && !chancellor.isHuman) {
+        return {
+          delayMs: Math.round(2400 * mult),
+          label: `Şansölye ${chancellor.name} yanıtlıyor`,
+        };
+      }
+      if (
+        c.presidentClaimed &&
+        c.chancellorClaimed &&
+        !president.isHuman &&
+        chancellor &&
+        !chancellor.isHuman
+      ) {
+        const readPause = c.hasConflict ? 5200 : 3800;
+        return {
+          delayMs: Math.round(readPause * mult),
+          label: c.hasConflict
+            ? '⚡ Çelişki inceleniyor (sonraki tura geçilecek)'
+            : 'Beyanlar okunuyor (sonraki tura geçilecek)',
+        };
+      }
+      return null;
+    }
+
+    if (s.phase === 'EXECUTIVE_INVESTIGATE' && !president.isHuman) {
+      return {
+        delayMs: Math.round(3200 * mult),
+        label: `Başkan ${president.name} soruşturma hedefi seçiyor`,
+      };
+    }
+
+    if (s.phase === 'EXECUTIVE_SPECIAL_ELECTION' && !president.isHuman) {
+      return {
+        delayMs: Math.round(3200 * mult),
+        label: `Başkan ${president.name} Özel Seçim adayı seçiyor`,
+      };
+    }
+
+    if (s.phase === 'EXECUTIVE_PEEK' && !president.isHuman) {
+      return {
+        delayMs: Math.round(3400 * mult),
+        label: `Başkan ${president.name} üst 3 kartı inceliyor`,
+      };
+    }
+
+    if (s.phase === 'EXECUTIVE_EXECUTION' && !president.isHuman) {
+      return {
+        delayMs: Math.round(3600 * mult),
+        label: `Başkan ${president.name} idam kararı veriyor`,
+      };
+    }
+
+    return null;
+  }
+
   private scheduleBotsIfNeeded(): void {
+    this.clearBotTimer();
+
+    if (this.isPaused) {
+      this.pendingUntilMs = 0;
+      this.pendingTotalMs = 0;
+      this.pendingStatusLabel = '⏸ Oyun Duraklatıldı';
+      this.updateCountdownUI();
+      return;
+    }
+
+    const cfg = this.computeBotStepConfig();
+    if (!cfg) {
+      this.justResolvedElection = false;
+      this.justEnactedPolicy = false;
+      this.pendingUntilMs = 0;
+      this.pendingTotalMs = 0;
+      this.pendingStatusLabel = '';
+      this.updateCountdownUI();
+      return;
+    }
+
+    this.pendingTotalMs = cfg.delayMs;
+    this.pendingUntilMs = performance.now() + cfg.delayMs;
+    this.pendingStatusLabel = cfg.label;
+    this.updateCountdownUI();
+
+    this.botTimerId = window.setTimeout(() => {
+      this.botTimerId = null;
+      this.justResolvedElection = false;
+      this.justEnactedPolicy = false;
+      this.engine.stepNextBot();
+    }, cfg.delayMs);
+  }
+
+  private triggerNextBotImmediately(): void {
+    this.clearBotTimer();
+    this.justResolvedElection = false;
+    this.justEnactedPolicy = false;
+    this.engine.stepNextBot();
+  }
+
+  private clearBotTimer(): void {
     if (this.botTimerId !== null) {
       window.clearTimeout(this.botTimerId);
       this.botTimerId = null;
     }
+  }
 
-    const s = this.engine.getState();
-    if (s.phase === 'GAME_OVER' || s.phase === 'SETUP') return;
+  private updateCountdownUI(): void {
+    if (!this.countdownTextEl && !this.countdownBarEl) return;
 
-    const president = this.engine.getCurrentPresident();
-    const chancellor = s.players.find((p) => p.id === s.chancellorId);
+    if (this.isPaused) {
+      if (this.countdownTextEl) this.countdownTextEl.textContent = '⏸ Duraklatıldı';
+      if (this.countdownBarEl) this.countdownBarEl.style.width = '100%';
+      return;
+    }
 
-    const needsBot =
-      (s.phase === 'ELECTION_NOMINATION' && !president.isHuman) ||
-      (s.phase === 'ELECTION_VOTING' &&
-        this.engine.getAlivePlayers().some((p) => !p.isHuman && !s.votes[p.id])) ||
-      (s.phase === 'LEGISLATIVE_PRESIDENT' && !president.isHuman) ||
-      (s.phase === 'LEGISLATIVE_CHANCELLOR' &&
-        chancellor !== undefined &&
-        !chancellor.isHuman) ||
-      (s.phase === 'LEGISLATIVE_VETO_RESPONSE' && !president.isHuman) ||
-      (s.phase === 'CLAIM_DEBATE' &&
-        s.currentClaim !== null &&
-        ((!s.currentClaim.presidentClaimed && !president.isHuman) ||
-          (!s.currentClaim.chancellorClaimed && chancellor !== undefined && !chancellor.isHuman) ||
-          (s.currentClaim.presidentClaimed &&
-            s.currentClaim.chancellorClaimed &&
-            !president.isHuman &&
-            chancellor !== undefined &&
-            !chancellor.isHuman))) ||
-      (s.phase === 'EXECUTIVE_INVESTIGATE' && !president.isHuman) ||
-      (s.phase === 'EXECUTIVE_SPECIAL_ELECTION' && !president.isHuman) ||
-      (s.phase === 'EXECUTIVE_PEEK' && !president.isHuman) ||
-      (s.phase === 'EXECUTIVE_EXECUTION' && !president.isHuman);
+    if (this.pendingUntilMs <= 0 || this.pendingTotalMs <= 0) return;
 
-    if (!needsBot) return;
+    const remMs = Math.max(0, this.pendingUntilMs - performance.now());
+    const remSec = Math.ceil(remMs / 1000);
+    const pct = Math.max(0, Math.min(100, (remMs / this.pendingTotalMs) * 100));
 
-    const delayMs = s.phase === 'CLAIM_DEBATE' ? 1400 : 850;
-    this.botTimerId = window.setTimeout(() => {
-      this.botTimerId = null;
-      this.engine.stepBots();
-    }, delayMs);
+    if (this.countdownTextEl) {
+      this.countdownTextEl.textContent = `⏳ ${this.pendingStatusLabel}... (${remSec}s)`;
+    }
+    if (this.countdownBarEl) {
+      this.countdownBarEl.style.width = `${pct}%`;
+    }
   }
 
   private getPhaseBannerText(view: PlayerView): string {
@@ -134,15 +335,16 @@ export class GameOverlay {
   private render(): void {
     const view = this.engine.getPlayerView('human');
     this.selectedCount = view.playerCount;
+    this.countdownTextEl = null;
+    this.countdownBarEl = null;
     this.root.replaceChildren();
 
     // =========================================================================
-    // 1. ÜST BAR (Gizli Zarf + Tur & Pano Skorları + Kişi Sayısı & Yeni Oyun)
+    // 1. ÜST BAR (Gizli Zarf + Tur/Pano Skorları + Hız/Duraklat/Kişi Sayısı)
     // =========================================================================
     const topWrapper = document.createElement('div');
     topWrapper.className = 'w-full flex items-start justify-between gap-2';
 
-    // Sol Üst: Gizli Kimlik Zarfı (Rol + Parti Üyeliği + Soruşturma Sonucu)
     const leftControls = document.createElement('div');
     leftControls.className = 'pointer-events-auto flex flex-col items-start gap-2 shrink-0';
 
@@ -165,10 +367,13 @@ export class GameOverlay {
     }
     topWrapper.appendChild(leftControls);
 
-    // Orta Üst: Tur Durumu & Skor Çubuğu
+    // Orta Üst: Tur Durumu & Skor Çubuğu + Son Olay Özeti
+    const centerTopCol = document.createElement('div');
+    centerTopCol.className = 'flex flex-col items-center gap-1.5 mx-auto';
+
     const statusBar = document.createElement('div');
     statusBar.className =
-      'pointer-events-auto mx-auto px-3.5 py-2 rounded-2xl bg-stone-950/90 border border-stone-700/80 backdrop-blur-md shadow-2xl flex flex-wrap items-center justify-center gap-2 text-xs';
+      'pointer-events-auto px-3.5 py-2 rounded-2xl bg-stone-950/90 border border-stone-700/80 backdrop-blur-md shadow-2xl flex flex-wrap items-center justify-center gap-2 text-xs';
 
     const modeBadge = document.createElement('span');
     modeBadge.className =
@@ -220,11 +425,64 @@ export class GameOverlay {
       chaosBadge,
       deckBadge
     );
-    topWrapper.appendChild(statusBar);
+    centerTopCol.appendChild(statusBar);
 
-    // Sağ Üst: Oyuncu Sayısı Seçici (5-10) & Yeniden Başlat
+    // Son önemli olay bildirimi (Oylama kabul/red, çıkan politika vb. anlık okunur)
+    if (this.lastEventToast) {
+      const toneMap: Record<EventToast['tone'], string> = {
+        blue: 'bg-blue-950/90 border-blue-400 text-blue-100',
+        red: 'bg-red-950/90 border-red-400 text-red-100',
+        emerald: 'bg-emerald-950/90 border-emerald-400 text-emerald-100',
+        amber: 'bg-amber-950/90 border-amber-400 text-amber-100',
+      };
+      const toastEl = document.createElement('div');
+      toastEl.className = `pointer-events-auto px-3.5 py-1 rounded-full border text-xs font-bold shadow-lg backdrop-blur-md flex items-center gap-2 ${
+        toneMap[this.lastEventToast.tone]
+      }`;
+      toastEl.textContent = `${this.lastEventToast.title} — ${this.lastEventToast.detail}`;
+      centerTopCol.appendChild(toastEl);
+    }
+
+    topWrapper.appendChild(centerTopCol);
+
+    // Sağ Üst: Oyun Hızı (Yavaş/Normal/Hızlı) + Duraklat + Kişi Sayısı + Yeni Oyun
     const rightControls = document.createElement('div');
-    rightControls.className = 'pointer-events-auto flex items-center gap-1.5 shrink-0';
+    rightControls.className = 'pointer-events-auto flex flex-wrap items-center justify-end gap-1.5 shrink-0';
+
+    const pauseBtn = document.createElement('button');
+    pauseBtn.type = 'button';
+    pauseBtn.className = `px-2.5 py-2 rounded-xl border text-xs font-bold shadow-xl backdrop-blur-md cursor-pointer transition ${
+      this.isPaused
+        ? 'bg-amber-500 text-stone-950 border-amber-300'
+        : 'bg-stone-900/90 hover:bg-stone-800 border-stone-700 text-stone-200'
+    }`;
+    pauseBtn.textContent = this.isPaused ? '▶ Devam' : '⏸ Duraklat';
+    pauseBtn.title = 'Akışı durdurup oy ve kayıtları rahatça okuyabilirsin';
+    pauseBtn.addEventListener('click', () => {
+      this.isPaused = !this.isPaused;
+      this.render();
+      this.scheduleBotsIfNeeded();
+    });
+
+    const paceSelect = document.createElement('select');
+    paceSelect.className =
+      'px-2 py-2 rounded-xl bg-stone-900/90 border border-stone-700 text-xs font-bold text-stone-200 shadow-xl backdrop-blur-md cursor-pointer focus:outline-none focus:border-amber-500';
+    paceSelect.title = 'Bot & Oyun Akış Hızı';
+    [
+      ['slow', '🐢 Yavaş'],
+      ['normal', '⚖️ Normal'],
+      ['fast', '⚡ Hızlı'],
+    ].forEach(([val, lbl]) => {
+      const opt = document.createElement('option');
+      opt.value = val;
+      opt.textContent = lbl;
+      if (val === this.paceMode) opt.selected = true;
+      paceSelect.appendChild(opt);
+    });
+    paceSelect.addEventListener('change', () => {
+      this.paceMode = paceSelect.value as PaceMode;
+      this.scheduleBotsIfNeeded();
+    });
 
     const countSelect = document.createElement('select');
     countSelect.className =
@@ -240,26 +498,29 @@ export class GameOverlay {
     countSelect.addEventListener('change', () => {
       this.selectedCount = Number(countSelect.value);
       this.roleEnvelopeOpen = false;
+      this.lastEventToast = null;
+      this.isPaused = false;
       this.engine.startNewGame({ playerCount: this.selectedCount, humanName: 'Sen' });
     });
 
     const resetBtn = document.createElement('button');
     resetBtn.type = 'button';
     resetBtn.className =
-      'px-3 py-2 rounded-xl bg-stone-900/90 hover:bg-stone-800 border border-stone-700 text-xs font-bold text-stone-200 shadow-xl backdrop-blur-md transition cursor-pointer whitespace-nowrap';
-    resetBtn.textContent = '↻ Yeni Oyun';
+      'px-2.5 py-2 rounded-xl bg-stone-900/90 hover:bg-stone-800 border border-stone-700 text-xs font-bold text-stone-200 shadow-xl backdrop-blur-md transition cursor-pointer whitespace-nowrap';
+    resetBtn.textContent = '↻ Yeni';
     resetBtn.addEventListener('click', () => {
       this.roleEnvelopeOpen = false;
+      this.lastEventToast = null;
+      this.isPaused = false;
       this.engine.startNewGame({ playerCount: this.selectedCount, humanName: 'Sen' });
     });
 
-    rightControls.append(countSelect, resetBtn);
+    rightControls.append(pauseBtn, paceSelect, countSelect, resetBtn);
     topWrapper.appendChild(rightControls);
-
     this.root.appendChild(topWrapper);
 
     // =========================================================================
-    // 2. ALT ALAN: OYUNCU DURUMLARI + AKTİF KARAR PANELİ + CANLI KAYITLAR
+    // 2. ALT ALAN: OYUNCU DURUMLARI + AKTİF KARAR / BEKLEME PANELİ + KAYITLAR
     // =========================================================================
     const bottomWrapper = document.createElement('div');
     bottomWrapper.className = 'w-full flex flex-col md:flex-row items-end justify-between gap-2.5';
@@ -273,6 +534,39 @@ export class GameOverlay {
 
     bottomWrapper.appendChild(this.buildLogsPanel(view));
     this.root.appendChild(bottomWrapper);
+    this.updateCountdownUI();
+  }
+
+  private buildBotWaitFooter(): HTMLElement {
+    const wrap = document.createElement('div');
+    wrap.className = 'pt-2 border-t border-stone-800 space-y-1.5';
+
+    const topRow = document.createElement('div');
+    topRow.className = 'flex items-center justify-between gap-2 text-[11px]';
+
+    const statusText = document.createElement('span');
+    statusText.className = 'text-amber-300 font-semibold';
+    this.countdownTextEl = statusText;
+
+    const skipBtn = document.createElement('button');
+    skipBtn.type = 'button';
+    skipBtn.className =
+      'shrink-0 px-2 py-1 rounded-lg bg-stone-800 hover:bg-stone-700 border border-stone-600 text-[10px] font-bold text-stone-200 cursor-pointer';
+    skipBtn.textContent = '⏭ İleri Al';
+    skipBtn.addEventListener('click', () => this.triggerNextBotImmediately());
+
+    topRow.append(statusText, skipBtn);
+
+    const barTrack = document.createElement('div');
+    barTrack.className = 'w-full h-1.5 bg-stone-800 rounded-full overflow-hidden';
+
+    const barFill = document.createElement('div');
+    barFill.className = 'h-full bg-amber-500 transition-[width] duration-100';
+    this.countdownBarEl = barFill;
+
+    barTrack.appendChild(barFill);
+    wrap.append(topRow, barTrack);
+    return wrap;
   }
 
   private buildSecretEnvelopeCard(view: PlayerView): HTMLElement {
@@ -319,7 +613,6 @@ export class GameOverlay {
 
     card.append(roleHeader, desc);
 
-    // Gece Fazı Bilgi Dinamiği (5-6 vs 7-10)
     const nightBox = document.createElement('div');
     nightBox.className = 'pt-2 border-t border-white/15 space-y-1 text-[11px]';
 
@@ -336,7 +629,6 @@ export class GameOverlay {
           ? `🌙 Gece Fazı: Faşist Ortakların: ${allyNames.join(', ')} • Hitler: ${hName}`
           : `🌙 Gece Fazı: Hitler: ${hName}`;
     } else {
-      // HITLER
       if (view.hitlerKnowsAllies) {
         const allyNames = view.knownFascists
           .map((id) => view.players.find((p) => p.id === id)?.name)
@@ -454,14 +746,21 @@ export class GameOverlay {
   private buildPhaseActionPanel(view: PlayerView): HTMLElement | null {
     const panel = document.createElement('div');
     panel.className =
-      'pointer-events-auto p-3.5 rounded-2xl bg-stone-950/95 border border-stone-700 shadow-2xl backdrop-blur-md min-w-[300px] max-w-md space-y-2.5';
+      'pointer-events-auto p-3.5 rounded-2xl bg-stone-950/95 border border-stone-700 shadow-2xl backdrop-blur-md min-w-[310px] max-w-md space-y-2.5';
+
+    const botStep = this.computeBotStepConfig();
+    const attachBotWaitIfNeeded = () => {
+      if (botStep || this.isPaused) {
+        panel.appendChild(this.buildBotWaitFooter());
+      }
+    };
 
     // 1. BAŞKAN ADAY SEÇİYOR
     if (view.phase === 'ELECTION_NOMINATION') {
       const title = document.createElement('div');
       title.className = 'text-xs font-black uppercase tracking-wider text-amber-400';
       title.textContent =
-        view.presidentId === view.yourId ? 'Şansölye Adayı Seç' : 'Aday Bekleniyor';
+        view.presidentId === view.yourId ? 'Şansölye Adayı Seç' : 'Yeni Tur — Aday Belirleniyor';
       panel.appendChild(title);
 
       if (view.presidentId === view.yourId) {
@@ -486,6 +785,7 @@ export class GameOverlay {
         info.className = 'text-xs text-stone-300';
         info.textContent = this.getPhaseBannerText(view);
         panel.appendChild(info);
+        attachBotWaitIfNeeded();
       }
       return panel;
     }
@@ -498,7 +798,9 @@ export class GameOverlay {
 
       const title = document.createElement('div');
       title.className = 'text-xs font-black uppercase tracking-wider text-amber-400';
-      title.textContent = 'Güven Oylaması';
+      title.textContent = `Güven Oylaması (${view.votedPlayerIds.length}/${
+        view.players.filter((p) => p.isAlive).length
+      })`;
 
       const subtitle = document.createElement('p');
       subtitle.className = 'text-xs text-stone-200';
@@ -513,12 +815,14 @@ export class GameOverlay {
         deadMsg.className = 'text-xs text-red-400 font-bold';
         deadMsg.textContent = 'İdam edildiğin için oylamaya katılamazsın.';
         panel.appendChild(deadMsg);
+        attachBotWaitIfNeeded();
       } else if (alreadyVoted) {
         const waitMsg = document.createElement('div');
         waitMsg.className =
           'p-2 rounded-xl bg-amber-500/15 border border-amber-500/40 text-amber-300 text-xs font-bold text-center';
-        waitMsg.textContent = 'Oyun kaydedildi, diğer oyuncular bekleniyor...';
+        waitMsg.textContent = 'Oyun kaydedildi — masadaki oylar sırayla açılıyor...';
         panel.appendChild(waitMsg);
+        attachBotWaitIfNeeded();
       } else {
         const btnRow = document.createElement('div');
         btnRow.className = 'grid grid-cols-2 gap-2';
@@ -547,7 +851,7 @@ export class GameOverlay {
       return panel;
     }
 
-    // 3. YASAMA — BAŞKAN (3 KARTTAN 1'İNİ AT)
+    // 3. YASAMA — BAŞKAN
     if (view.phase === 'LEGISLATIVE_PRESIDENT') {
       const title = document.createElement('div');
       title.className = 'text-xs font-black uppercase tracking-wider text-amber-400';
@@ -571,11 +875,12 @@ export class GameOverlay {
         wait.className = 'text-xs text-stone-300';
         wait.textContent = this.getPhaseBannerText(view);
         panel.appendChild(wait);
+        attachBotWaitIfNeeded();
       }
       return panel;
     }
 
-    // 4. YASAMA — ŞANSÖLYE (2 KARTTAN 1'İNİ GEÇİR VEYA VETO TEKLİF ET)
+    // 4. YASAMA — ŞANSÖLYE
     if (view.phase === 'LEGISLATIVE_CHANCELLOR') {
       const title = document.createElement('div');
       title.className = 'text-xs font-black uppercase tracking-wider text-emerald-400';
@@ -612,11 +917,12 @@ export class GameOverlay {
         wait.className = 'text-xs text-stone-300';
         wait.textContent = this.getPhaseBannerText(view);
         panel.appendChild(wait);
+        attachBotWaitIfNeeded();
       }
       return panel;
     }
 
-    // 5. VETO YANIT AŞAMASI (BAŞKAN)
+    // 5. VETO YANIT
     if (view.phase === 'LEGISLATIVE_VETO_RESPONSE') {
       const title = document.createElement('div');
       title.className = 'text-xs font-black uppercase tracking-wider text-amber-400';
@@ -652,6 +958,7 @@ export class GameOverlay {
         wait.className = 'text-xs text-stone-300';
         wait.textContent = this.getPhaseBannerText(view);
         panel.appendChild(wait);
+        attachBotWaitIfNeeded();
       }
       return panel;
     }
@@ -667,7 +974,6 @@ export class GameOverlay {
       title.textContent = '💬 Tartışma & Kart Beyanları';
       panel.appendChild(title);
 
-      // Çıkan politika özeti
       const summary = document.createElement('div');
       summary.className = 'text-[11px] space-y-1 bg-stone-900/90 p-2.5 rounded-xl border border-stone-800';
       const line1 = document.createElement('div');
@@ -689,7 +995,6 @@ export class GameOverlay {
         panel.appendChild(alert);
       }
 
-      // İnsan Başkan beyan formu
       if (c.presidentId === view.yourId && !c.presidentClaimed) {
         panel.appendChild(this.buildPresidentClaimForm(view.yourId));
       } else if (c.chancellorId === view.yourId && !c.chancellorClaimed) {
@@ -700,14 +1005,20 @@ export class GameOverlay {
         contBtn.className =
           'w-full py-2 rounded-xl bg-amber-500 hover:bg-amber-400 text-stone-950 font-black text-xs cursor-pointer';
         contBtn.textContent = 'Tartışmayı Bitir / Devam Et →';
-        contBtn.addEventListener('click', () => this.engine.finishClaimDebate());
+        contBtn.addEventListener('click', () => {
+          this.clearBotTimer();
+          this.engine.finishClaimDebate();
+        });
         panel.appendChild(contBtn);
+        attachBotWaitIfNeeded();
+      } else {
+        attachBotWaitIfNeeded();
       }
 
       return panel;
     }
 
-    // 7. YETKİ: BAĞLILIK SORUŞTURMASI (INVESTIGATE)
+    // 7. YETKİ: BAĞLILIK SORUŞTURMASI
     if (view.phase === 'EXECUTIVE_INVESTIGATE') {
       const title = document.createElement('div');
       title.className = 'text-xs font-black uppercase tracking-wider text-purple-400';
@@ -738,11 +1049,12 @@ export class GameOverlay {
         wait.className = 'text-xs text-stone-300';
         wait.textContent = this.getPhaseBannerText(view);
         panel.appendChild(wait);
+        attachBotWaitIfNeeded();
       }
       return panel;
     }
 
-    // 8. YETKİ: ÖZEL SEÇİM (SPECIAL_ELECTION)
+    // 8. YETKİ: ÖZEL SEÇİM
     if (view.phase === 'EXECUTIVE_SPECIAL_ELECTION') {
       const title = document.createElement('div');
       title.className = 'text-xs font-black uppercase tracking-wider text-amber-400';
@@ -773,11 +1085,12 @@ export class GameOverlay {
         wait.className = 'text-xs text-stone-300';
         wait.textContent = this.getPhaseBannerText(view);
         panel.appendChild(wait);
+        attachBotWaitIfNeeded();
       }
       return panel;
     }
 
-    // 9. YETKİ: DESTEYE GÖZ ATMA (POLICY_PEEK)
+    // 9. YETKİ: DESTEYE GÖZ ATMA
     if (view.phase === 'EXECUTIVE_PEEK') {
       const title = document.createElement('div');
       title.className = 'text-xs font-black uppercase tracking-wider text-amber-400';
@@ -811,11 +1124,12 @@ export class GameOverlay {
         wait.className = 'text-xs text-stone-300';
         wait.textContent = this.getPhaseBannerText(view);
         panel.appendChild(wait);
+        attachBotWaitIfNeeded();
       }
       return panel;
     }
 
-    // 10. YETKİ: İDAM (EXECUTION)
+    // 10. YETKİ: İDAM
     if (view.phase === 'EXECUTIVE_EXECUTION') {
       const title = document.createElement('div');
       title.className = 'text-xs font-black uppercase tracking-wider text-red-400';
@@ -843,6 +1157,7 @@ export class GameOverlay {
         wait.className = 'text-xs text-stone-300';
         wait.textContent = this.getPhaseBannerText(view);
         panel.appendChild(wait);
+        attachBotWaitIfNeeded();
       }
       return panel;
     }
@@ -867,6 +1182,8 @@ export class GameOverlay {
       againBtn.textContent = '🔄 Yeniden Oyna';
       againBtn.addEventListener('click', () => {
         this.roleEnvelopeOpen = false;
+        this.lastEventToast = null;
+        this.isPaused = false;
         this.engine.startNewGame({ playerCount: this.selectedCount, humanName: 'Sen' });
       });
 
@@ -1086,11 +1403,15 @@ export class GameOverlay {
   }
 
   dispose(): void {
-    if (this.botTimerId !== null) {
-      window.clearTimeout(this.botTimerId);
-      this.botTimerId = null;
+    this.clearBotTimer();
+    if (this.countdownIntervalId !== null) {
+      window.clearInterval(this.countdownIntervalId);
+      this.countdownIntervalId = null;
     }
-    this.unsubscribe?.();
+    for (const unsub of this.unsubscribers) {
+      unsub();
+    }
+    this.unsubscribers = [];
     this.root.replaceChildren();
   }
 }

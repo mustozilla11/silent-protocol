@@ -1330,6 +1330,56 @@ export class GameEngine {
     }
   }
 
+  /**
+   * Arayüzde okunabilir tempo için tek bir adım/bot aksiyonu yürütür:
+   * Oylamada tüm botlar aynı anda değil sırayla oy verir; tartışmada Başkan ve Şansölye sırayla beyan sunar.
+   */
+  stepNextBot(): 'VOTED' | 'PRESIDENT_CLAIM' | 'CHANCELLOR_CLAIM' | 'FINISHED_CLAIM' | 'ACTED' | 'IDLE' {
+    const s = this.state;
+    if (s.phase === 'ELECTION_VOTING') {
+      const nextBot = this.getAlivePlayers().find((p) => !p.isHuman && !s.votes[p.id]);
+      if (!nextBot) return 'IDLE';
+      const vote = this.bots.chooseVote(nextBot, s);
+      this.castVote(nextBot.id, vote);
+      return 'VOTED';
+    }
+
+    if (s.phase === 'CLAIM_DEBATE' && s.currentClaim) {
+      const claim = s.currentClaim;
+      const pres = s.players.find((p) => p.id === claim.presidentId)!;
+      const chanc = s.players.find((p) => p.id === claim.chancellorId)!;
+
+      if (!claim.presidentClaimed && !pres.isHuman) {
+        const { drawn, passed } = this.bots.choosePresidentClaim(
+          pres,
+          s.actualPresidentDrawn,
+          s.presidentHand,
+          claim.enactedPolicy
+        );
+        this.submitPresidentClaim(pres.id, drawn, passed);
+        return 'PRESIDENT_CLAIM';
+      }
+
+      if (!claim.chancellorClaimed && !chanc.isHuman) {
+        const rec = this.bots.chooseChancellorClaim(
+          chanc,
+          s.presidentHand,
+          claim.enactedPolicy
+        );
+        this.submitChancellorClaim(chanc.id, rec);
+        return 'CHANCELLOR_CLAIM';
+      }
+
+      if (claim.presidentClaimed && claim.chancellorClaimed && !pres.isHuman && !chanc.isHuman) {
+        this.finishClaimDebate();
+        return 'FINISHED_CLAIM';
+      }
+      return 'IDLE';
+    }
+
+    return this.stepBots() ? 'ACTED' : 'IDLE';
+  }
+
   private formatHand(cards: Policy[]): string {
     const lib = cards.filter((c) => c === 'LIBERAL').length;
     const fasc = cards.length - lib;

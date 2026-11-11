@@ -238,6 +238,29 @@ function testClaimContradictionDetection(): void {
   console.log('✓ Test 4: Yasama sonrası Beyan (Claim) çelişki tespiti doğrulandı.');
 }
 
+function testStaggeredBotStepping(): void {
+  const engine = new GameEngine({
+    playerCount: 5,
+    rng: createSeededRng(88),
+    startingPresidentIndex: 0,
+  });
+  passCurrentElectionStepByStep(engine, 'bot-1');
+  assert.equal(engine.getState().phase, 'LEGISLATIVE_PRESIDENT');
+  console.log('✓ Test 6: Sırayla tekil bot oylama adımı (stepNextBot) doğrulandı.');
+}
+
+function passCurrentElectionStepByStep(engine: GameEngine, nomineeId: string): void {
+  engine.nominateChancellor('human', nomineeId);
+  engine.castVote('human', 'JA');
+  let votesCastByBots = 0;
+  while (engine.getState().phase === 'ELECTION_VOTING') {
+    const res = engine.stepNextBot();
+    assert.equal(res, 'VOTED');
+    votesCastByBots++;
+  }
+  assert.equal(votesCastByBots, 4);
+}
+
 function testFullOfflineSimulations5And8Players(): void {
   for (const count of [5, 8]) {
     const sim = new GameEngine({
@@ -324,4 +347,5 @@ testInvestigateAndSpecialElectionOrder();
 testVetoUnlockRejectAndAcceptChaos();
 testClaimContradictionDetection();
 testFullOfflineSimulations5And8Players();
+testStaggeredBotStepping();
 console.log('=== TÜM TESTLER BAŞARIYLA GEÇTİ ===');
