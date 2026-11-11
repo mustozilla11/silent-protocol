@@ -1,7 +1,7 @@
 {
   "name": "silent-protocol-client",
   "private": true,
-  "version": "1.0.0-step2",
+  "version": "1.0.0-step3",
   "type": "module",
   "scripts": {
     "dev": "vite",
