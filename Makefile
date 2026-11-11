@@ -1,4 +1,4 @@
-VERSION ?= v0.7.0
+VERSION ?= v1.0.0
 BIN_DIR ?= bin
 BINARY ?= $(BIN_DIR)/silent-protocol
 INSTALL_BIN ?= $(HOME)/.local/bin

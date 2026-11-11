@@ -4,10 +4,10 @@ import { TableScene } from './render/index.ts';
 import { GameOverlay } from './ui/index.ts';
 
 /**
- * Adım 4 Giriş Noktası:
- * - /engine: Saf başsız Secret Hitler kural motoru
- * - /render: 3D Masa & Board düz plakaları (henüz olaylara bağlı kart/oyuncu animasyonları yok; Adım 5)
- * - /ui: Canvas üzerine position: absolute / fixed ile oturan HTML/Tailwind arayüz katmanı
+ * Adım 5 Tam Entegrasyon:
+ * - /engine: Saf başsız Secret Hitler state machine (Three.js/DOM'suz)
+ * - /render: GameEngine event'lerini dinleyen 3D sahne (5 oyuncu figürü, sıra halkası/ışığı, orta kart kutuları)
+ * - /ui: Canvas üzerine position: fixed/absolute oturan HTML/Tailwind overlay
  */
 const engine = new GameEngine({ humanName: 'Sen' });
 
@@ -21,7 +21,7 @@ if (!(overlayEl instanceof HTMLElement)) {
   throw new Error('#ui-overlay element bulunamadı.');
 }
 
-const tableScene = new TableScene({ canvas });
+const tableScene = new TableScene({ canvas, engine });
 const uiOverlay = new GameOverlay(overlayEl, engine);
 
 declare global {
