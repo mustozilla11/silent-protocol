@@ -1,25 +1,31 @@
 import type { GameEngine, PlayerView, Policy } from '../engine/index.ts';
 
 /**
- * Adım 4: Tam Ekran 3D Canvas Üzerine Oturan HTML/CSS (Tailwind) Overlay Katmanı.
- * Tüm metinler, gizli rol kartı, Ja/Nein oylama butonları, politika seçimleri
- * ve üst tur durum çubuğu WebGL dışındaki DOM üzerinde yaşar.
+ * 5–10 Kişilik Tam Kapasiteli Secret Hitler HTML/Tailwind UI Overlay Katmanı.
+ * Tüm metinler, Gizli Kimlik Zarfı (Rol + Parti Kartı), Ja/Nein oylama, Veto,
+ * Bağlılık Soruşturması, Özel Seçim, Tartışma Beyanları ve kayıtlar DOM üzerinde yaşar.
  */
 export class GameOverlay {
   private readonly root: HTMLElement;
   private readonly engine: GameEngine;
-  private roleCardOpen = false;
+  private roleEnvelopeOpen = false;
   private logsOpen = true;
   private botTimerId: number | null = null;
   private unsubscribe: (() => void) | null = null;
+  private selectedCount: number;
+
+  // Beyan formu geçici seçimleri
+  private claimDrawnLib = 1;
+  private claimPassedLib = 1;
+  private claimRecLib = 1;
 
   constructor(root: HTMLElement, engine: GameEngine) {
     this.root = root;
     this.engine = engine;
+    this.selectedCount = engine.getState().playerCount;
 
-    // #ui-overlay konumu position: absolute olarak 3D canvas üzerine tam oturur
     this.root.className =
-      'fixed inset-0 z-10 pointer-events-none flex flex-col justify-between p-3 sm:p-5 font-sans text-stone-100 select-none';
+      'fixed inset-0 z-10 pointer-events-none flex flex-col justify-between p-3 sm:p-4 font-sans text-stone-100 select-none';
 
     this.unsubscribe = this.engine.events.on('STATE_CHANGED', () => {
       this.render();
@@ -47,17 +53,31 @@ export class GameOverlay {
       (s.phase === 'ELECTION_VOTING' &&
         this.engine.getAlivePlayers().some((p) => !p.isHuman && !s.votes[p.id])) ||
       (s.phase === 'LEGISLATIVE_PRESIDENT' && !president.isHuman) ||
-      (s.phase === 'LEGISLATIVE_CHANCELLOR' && chancellor !== undefined && !chancellor.isHuman) ||
+      (s.phase === 'LEGISLATIVE_CHANCELLOR' &&
+        chancellor !== undefined &&
+        !chancellor.isHuman) ||
+      (s.phase === 'LEGISLATIVE_VETO_RESPONSE' && !president.isHuman) ||
+      (s.phase === 'CLAIM_DEBATE' &&
+        s.currentClaim !== null &&
+        ((!s.currentClaim.presidentClaimed && !president.isHuman) ||
+          (!s.currentClaim.chancellorClaimed && chancellor !== undefined && !chancellor.isHuman) ||
+          (s.currentClaim.presidentClaimed &&
+            s.currentClaim.chancellorClaimed &&
+            !president.isHuman &&
+            chancellor !== undefined &&
+            !chancellor.isHuman))) ||
+      (s.phase === 'EXECUTIVE_INVESTIGATE' && !president.isHuman) ||
+      (s.phase === 'EXECUTIVE_SPECIAL_ELECTION' && !president.isHuman) ||
       (s.phase === 'EXECUTIVE_PEEK' && !president.isHuman) ||
       (s.phase === 'EXECUTIVE_EXECUTION' && !president.isHuman);
 
     if (!needsBot) return;
 
-    // Oyuncunun aşamaları okuyabilmesi için doğal ~850ms bekleme payı
+    const delayMs = s.phase === 'CLAIM_DEBATE' ? 1400 : 850;
     this.botTimerId = window.setTimeout(() => {
       this.botTimerId = null;
       this.engine.stepBots();
-    }, 850);
+    }, delayMs);
   }
 
   private getPhaseBannerText(view: PlayerView): string {
@@ -68,28 +88,44 @@ export class GameOverlay {
     switch (view.phase) {
       case 'ELECTION_NOMINATION':
         return view.presidentId === view.yourId
-          ? 'Başkansın — Şansölye adayını seç!'
-          : `Başkan ${pres?.name ?? ''} Şansölye adayı seçiyor...`;
+          ? `${view.isSpecialElectionRound ? 'Özel Başkan Sensin' : 'Başkansın'} — Şansölye adayını seç!`
+          : `${view.isSpecialElectionRound ? 'Özel Başkan' : 'Başkan'} ${pres?.name ?? ''} Şansölye adayı seçiyor...`;
       case 'ELECTION_VOTING':
         return `Hükümet Oylaması: Başkan ${pres?.name ?? ''} & Şansölye Adayı ${nom?.name ?? ''}`;
       case 'LEGISLATIVE_PRESIDENT':
         return view.presidentId === view.yourId
-          ? 'Başkansın — 3 karttan 1’ini ıskartaya at!'
-          : `Başkan ${pres?.name ?? ''} kart seçiyor...`;
+          ? 'Başkansın — 3 karttan 1’ini kapalı çöpe at!'
+          : `Başkan ${pres?.name ?? ''} 3 kartı inceliyor...`;
       case 'LEGISLATIVE_CHANCELLOR':
         return view.chancellorId === view.yourId
-          ? 'Şansölyesin — 2 karttan 1’ini yasalaştır!'
+          ? 'Şansölyesin — 2 karttan 1’ini geçir!'
           : `Şansölye ${chanc?.name ?? ''} kart seçiyor...`;
+      case 'LEGISLATIVE_VETO_RESPONSE':
+        return view.presidentId === view.yourId
+          ? 'Şansölye Veto teklif etti! Kabul ediyor musun?'
+          : `Başkan ${pres?.name ?? ''} Veto kararını veriyor...`;
+      case 'CLAIM_DEBATE':
+        return 'Yasama Sonrası Tartışma & Kart Beyanları';
+      case 'EXECUTIVE_INVESTIGATE':
+        return view.presidentId === view.yourId
+          ? 'Soruşturma Yetkisi: Bir oyuncunun Parti Üyeliğine bak!'
+          : `Başkan ${pres?.name ?? ''} bağlılık soruşturması yapıyor...`;
+      case 'EXECUTIVE_SPECIAL_ELECTION':
+        return view.presidentId === view.yourId
+          ? 'Özel Seçim: Sıradaki Başkan adayını bizzat seç!'
+          : `Başkan ${pres?.name ?? ''} Özel Seçim yapıyor...`;
       case 'EXECUTIVE_PEEK':
         return view.presidentId === view.yourId
-          ? 'Yetki: Destenin üstündeki 3 kartı incele'
-          : `Başkan ${pres?.name ?? ''} destenin üstündeki kartlara göz atıyor...`;
+          ? 'Yetki: Destenin üstündeki 3 kartı gizlice incele'
+          : `Başkan ${pres?.name ?? ''} destenin üstündeki 3 kartı inceliyor...`;
       case 'EXECUTIVE_EXECUTION':
         return view.presidentId === view.yourId
-          ? 'İnfaz Yetkisi — Masadan bir oyuncuyu seç!'
-          : `Başkan ${pres?.name ?? ''} infaz kararı veriyor...`;
+          ? 'İdam Yetkisi — Masadan bir oyuncuyu infaz et!'
+          : `Başkan ${pres?.name ?? ''} idam kararı veriyor...`;
       case 'GAME_OVER':
-        return view.winReason ? `Oyun Bitti: ${view.winner === 'LIBERAL' ? 'Liberaller Kazandı' : 'Faşistler Kazandı'}` : 'Oyun Bitti';
+        return view.winner === 'LIBERAL'
+          ? 'Oyun Bitti: LİBERALLER KAZANDI!'
+          : 'Oyun Bitti: FAŞİSTLER KAZANDI!';
       default:
         return 'Masa Hazırlanıyor...';
     }
@@ -97,15 +133,16 @@ export class GameOverlay {
 
   private render(): void {
     const view = this.engine.getPlayerView('human');
+    this.selectedCount = view.playerCount;
     this.root.replaceChildren();
 
     // =========================================================================
-    // 1. ÜST BAR (Tur Durumu, Politika Sayaçları, Kaos ve Hızlı Kontroller)
+    // 1. ÜST BAR (Gizli Zarf + Tur & Pano Skorları + Kişi Sayısı & Yeni Oyun)
     // =========================================================================
     const topWrapper = document.createElement('div');
     topWrapper.className = 'w-full flex items-start justify-between gap-2';
 
-    // Sol Üst: Gizli Kimlik Butonu & Açılır Rol Kartı
+    // Sol Üst: Gizli Kimlik Zarfı (Rol + Parti Üyeliği + Soruşturma Sonucu)
     const leftControls = document.createElement('div');
     leftControls.className = 'pointer-events-auto flex flex-col items-start gap-2 shrink-0';
 
@@ -113,19 +150,18 @@ export class GameOverlay {
     roleBtn.type = 'button';
     roleBtn.className =
       'px-3 py-2 rounded-xl bg-stone-900/90 hover:bg-stone-800 border border-amber-500/40 text-xs font-bold shadow-xl backdrop-blur-md flex items-center gap-1.5 transition cursor-pointer whitespace-nowrap';
-    const lockIcon = document.createElement('span');
-    lockIcon.textContent = this.roleCardOpen ? '👁️' : '🕵️';
-    const btnLabel = document.createElement('span');
-    btnLabel.textContent = this.roleCardOpen ? 'Rolü Gizle' : 'Gizli Rolüm';
-    roleBtn.append(lockIcon, btnLabel);
+    roleBtn.textContent = this.roleEnvelopeOpen ? '👁️ Zarfı Kapat' : '🕵️ Gizli Zarfım';
     roleBtn.addEventListener('click', () => {
-      this.roleCardOpen = !this.roleCardOpen;
+      this.roleEnvelopeOpen = !this.roleEnvelopeOpen;
       this.render();
     });
     leftControls.appendChild(roleBtn);
 
-    if (this.roleCardOpen) {
-      leftControls.appendChild(this.buildSecretRoleCard(view));
+    if (this.roleEnvelopeOpen) {
+      leftControls.appendChild(this.buildSecretEnvelopeCard(view));
+    }
+    if (view.lastInvestigation && view.lastInvestigation.investigatorId === view.yourId) {
+      leftControls.appendChild(this.buildInvestigationBadge(view));
     }
     topWrapper.appendChild(leftControls);
 
@@ -133,6 +169,11 @@ export class GameOverlay {
     const statusBar = document.createElement('div');
     statusBar.className =
       'pointer-events-auto mx-auto px-3.5 py-2 rounded-2xl bg-stone-950/90 border border-stone-700/80 backdrop-blur-md shadow-2xl flex flex-wrap items-center justify-center gap-2 text-xs';
+
+    const modeBadge = document.createElement('span');
+    modeBadge.className =
+      'px-2 py-0.5 rounded bg-stone-800 border border-stone-700 font-mono font-bold text-stone-300';
+    modeBadge.textContent = `${view.playerCount} Kişi`;
 
     const roundBadge = document.createElement('span');
     roundBadge.className =
@@ -155,7 +196,7 @@ export class GameOverlay {
     const fascBadge = document.createElement('span');
     fascBadge.className =
       'px-2 py-0.5 rounded bg-red-950/80 border border-red-500/50 text-red-300 font-bold';
-    fascBadge.textContent = `Faşist: ${view.fascistPolicies}/6`;
+    fascBadge.textContent = `Faşist: ${view.fascistPolicies}/6${view.vetoUnlocked ? ' (Veto Açık)' : ''}`;
 
     const chaosBadge = document.createElement('span');
     chaosBadge.className = `px-2 py-0.5 rounded border font-bold ${
@@ -163,13 +204,14 @@ export class GameOverlay {
         ? 'bg-amber-900/70 border-amber-400 text-amber-200 animate-pulse'
         : 'bg-stone-900 border-stone-700 text-stone-300'
     }`;
-    chaosBadge.textContent = `Kaos: ${view.electionTracker}/3`;
+    chaosBadge.textContent = `Sayaç: ${view.electionTracker}/3`;
 
     const deckBadge = document.createElement('span');
     deckBadge.className = 'text-[11px] font-mono text-stone-400';
-    deckBadge.textContent = `Deste: ${view.drawPileCount} • Iskarta: ${view.discardPileCount}`;
+    deckBadge.textContent = `Deste: ${view.drawPileCount} • Çöp: ${view.discardPileCount}`;
 
     statusBar.append(
+      modeBadge,
       roundBadge,
       phaseText,
       divider,
@@ -180,9 +222,26 @@ export class GameOverlay {
     );
     topWrapper.appendChild(statusBar);
 
-    // Sağ Üst: Yeniden Başlat
+    // Sağ Üst: Oyuncu Sayısı Seçici (5-10) & Yeniden Başlat
     const rightControls = document.createElement('div');
-    rightControls.className = 'pointer-events-auto flex items-center gap-2 shrink-0';
+    rightControls.className = 'pointer-events-auto flex items-center gap-1.5 shrink-0';
+
+    const countSelect = document.createElement('select');
+    countSelect.className =
+      'px-2 py-2 rounded-xl bg-stone-900/90 border border-stone-700 text-xs font-bold text-stone-200 shadow-xl backdrop-blur-md cursor-pointer focus:outline-none focus:border-amber-500';
+    countSelect.title = 'Masadaki Kişi Sayısı (5-10)';
+    for (let n = 5; n <= 10; n++) {
+      const opt = document.createElement('option');
+      opt.value = String(n);
+      opt.textContent = `${n} Kişi`;
+      if (n === this.selectedCount) opt.selected = true;
+      countSelect.appendChild(opt);
+    }
+    countSelect.addEventListener('change', () => {
+      this.selectedCount = Number(countSelect.value);
+      this.roleEnvelopeOpen = false;
+      this.engine.startNewGame({ playerCount: this.selectedCount, humanName: 'Sen' });
+    });
 
     const resetBtn = document.createElement('button');
     resetBtn.type = 'button';
@@ -190,10 +249,11 @@ export class GameOverlay {
       'px-3 py-2 rounded-xl bg-stone-900/90 hover:bg-stone-800 border border-stone-700 text-xs font-bold text-stone-200 shadow-xl backdrop-blur-md transition cursor-pointer whitespace-nowrap';
     resetBtn.textContent = '↻ Yeni Oyun';
     resetBtn.addEventListener('click', () => {
-      this.roleCardOpen = false;
-      this.engine.startNewGame({ humanName: 'Sen' });
+      this.roleEnvelopeOpen = false;
+      this.engine.startNewGame({ playerCount: this.selectedCount, humanName: 'Sen' });
     });
-    rightControls.appendChild(resetBtn);
+
+    rightControls.append(countSelect, resetBtn);
     topWrapper.appendChild(rightControls);
 
     this.root.appendChild(topWrapper);
@@ -202,24 +262,20 @@ export class GameOverlay {
     // 2. ALT ALAN: OYUNCU DURUMLARI + AKTİF KARAR PANELİ + CANLI KAYITLAR
     // =========================================================================
     const bottomWrapper = document.createElement('div');
-    bottomWrapper.className = 'w-full flex flex-col md:flex-row items-end justify-between gap-3';
+    bottomWrapper.className = 'w-full flex flex-col md:flex-row items-end justify-between gap-2.5';
 
-    // Sol Alt: Masadaki 5 Oyuncunun Rol/Başkan/Şansölye/Oy Durumu Rozetleri
     bottomWrapper.appendChild(this.buildPlayersStrip(view));
 
-    // Orta: Aktif Faz Aksiyon Paneli (Ja/Nein oylama, Aday seçimi, Kart seçimi, Peek/İnfaz, GameOver)
     const actionPanel = this.buildPhaseActionPanel(view);
     if (actionPanel) {
       bottomWrapper.appendChild(actionPanel);
     }
 
-    // Sağ Alt: Açılır/Kapanır Masa Olay Kayıtları
     bottomWrapper.appendChild(this.buildLogsPanel(view));
-
     this.root.appendChild(bottomWrapper);
   }
 
-  private buildSecretRoleCard(view: PlayerView): HTMLElement {
+  private buildSecretEnvelopeCard(view: PlayerView): HTMLElement {
     const card = document.createElement('div');
     const roleColor =
       view.yourRole === 'LIBERAL'
@@ -228,54 +284,87 @@ export class GameOverlay {
         ? 'border-red-500/70 bg-stone-950/95 text-red-100'
         : 'border-purple-500/70 bg-stone-950/95 text-purple-100';
 
-    card.className = `w-64 p-3.5 rounded-2xl border-2 shadow-2xl backdrop-blur-md space-y-2 text-xs ${roleColor}`;
+    card.className = `w-72 p-3.5 rounded-2xl border-2 shadow-2xl backdrop-blur-md space-y-2.5 text-xs ${roleColor}`;
 
-    const title = document.createElement('div');
-    title.className = 'text-sm font-black tracking-wide uppercase';
-    title.textContent =
+    const roleHeader = document.createElement('div');
+    roleHeader.className = 'flex items-center justify-between gap-2';
+
+    const roleTitle = document.createElement('span');
+    roleTitle.className = 'text-sm font-black tracking-wide uppercase';
+    roleTitle.textContent =
       view.yourRole === 'LIBERAL'
-        ? '🕊️ LIBERAL'
+        ? '🕊️ GİZLİ ROL: LİBERAL'
         : view.yourRole === 'FASCIST'
-        ? '🔥 FAŞİST'
-        : '💀 HITLER';
+        ? '🔥 GİZLİ ROL: FAŞİST'
+        : '💀 GİZLİ ROL: HITLER';
+
+    const partyPill = document.createElement('span');
+    partyPill.className = `px-2 py-0.5 rounded font-black text-[10px] border ${
+      view.yourParty === 'LIBERAL'
+        ? 'bg-blue-700/80 border-blue-400 text-white'
+        : 'bg-red-700/80 border-red-400 text-white'
+    }`;
+    partyPill.textContent = `PARTİ: ${view.yourParty === 'LIBERAL' ? 'LİBERAL' : 'FAŞİST'}`;
+
+    roleHeader.append(roleTitle, partyPill);
 
     const desc = document.createElement('p');
     desc.className = 'text-[11px] opacity-85 leading-relaxed';
     desc.textContent =
       view.yourRole === 'LIBERAL'
-        ? '5 Liberal politika geçir veya Hitler’i tespit edip infaz ettir.'
+        ? '5 Liberal politika geçir veya Hitler’i tespit edip idam ettir. Parti kartın: Liberal.'
         : view.yourRole === 'FASCIST'
-        ? 'Hitler’i koru! 6 Faşist politika geçir ya da 3+ sonrası Hitler’i Şansölye yap.'
-        : 'Liberal gibi davran! 3+ Faşist politikadan sonra Şansölye seçilirsen kazanırsın.';
+        ? 'Hitler’i koru! 6 Faşist politika geçir ya da 3+ Faşist karttan sonra Hitler’i Şansölye yaptır.'
+        : 'Parti kartında da "Faşist" yazar! 3+ Faşist politikadan sonra Şansölye seçilirsen kazanırsın.';
 
-    card.append(title, desc);
+    card.append(roleHeader, desc);
 
-    if (view.yourRole === 'FASCIST' || view.yourRole === 'HITLER') {
-      const secretBox = document.createElement('div');
-      secretBox.className = 'pt-2 border-t border-white/15 space-y-1 text-[11px]';
+    // Gece Fazı Bilgi Dinamiği (5-6 vs 7-10)
+    const nightBox = document.createElement('div');
+    nightBox.className = 'pt-2 border-t border-white/15 space-y-1 text-[11px]';
 
-      const fascistNames = view.knownFascists
+    if (view.yourRole === 'LIBERAL') {
+      nightBox.textContent = '🌙 Gece Fazı: Liberaller kimlerin ne olduğunu bilmez.';
+    } else if (view.yourRole === 'FASCIST') {
+      const allyNames = view.knownFascists
         .filter((id) => id !== view.yourId)
         .map((id) => view.players.find((p) => p.id === id)?.name)
         .filter(Boolean);
-
-      if (fascistNames.length > 0) {
-        const fLine = document.createElement('div');
-        fLine.textContent = `Faşist Ortağın: ${fascistNames.join(', ')}`;
-        secretBox.appendChild(fLine);
+      const hName = view.players.find((p) => p.id === view.knownHitlerId)?.name ?? '';
+      nightBox.textContent =
+        allyNames.length > 0
+          ? `🌙 Gece Fazı: Faşist Ortakların: ${allyNames.join(', ')} • Hitler: ${hName}`
+          : `🌙 Gece Fazı: Hitler: ${hName}`;
+    } else {
+      // HITLER
+      if (view.hitlerKnowsAllies) {
+        const allyNames = view.knownFascists
+          .map((id) => view.players.find((p) => p.id === id)?.name)
+          .filter(Boolean);
+        nightBox.textContent = `🌙 5–6 Kişi Kuralı: Faşist ortağını tanıyorsun -> ${allyNames.join(', ')}`;
+      } else {
+        nightBox.textContent =
+          '🌙 7–10 Kişi Kuralı (Kör Hitler): Takım arkadaşlarını BİLMİYORSUN! Faşistler seni koruyana dek saf Liberal gibi oyna.';
       }
-
-      if (view.knownHitlerId && view.knownHitlerId !== view.yourId) {
-        const hName = view.players.find((p) => p.id === view.knownHitlerId)?.name;
-        const hLine = document.createElement('div');
-        hLine.textContent = `Hitler: ${hName ?? ''}`;
-        secretBox.appendChild(hLine);
-      }
-
-      card.appendChild(secretBox);
     }
 
+    card.appendChild(nightBox);
     return card;
+  }
+
+  private buildInvestigationBadge(view: PlayerView): HTMLElement {
+    const inv = view.lastInvestigation!;
+    const targetName = view.players.find((p) => p.id === inv.targetId)?.name ?? '';
+    const badge = document.createElement('div');
+    badge.className = `px-3 py-2 rounded-xl border text-xs font-bold shadow-xl backdrop-blur-md ${
+      inv.partyMembership === 'FASCIST'
+        ? 'bg-red-950/90 border-red-500 text-red-200'
+        : 'bg-blue-950/90 border-blue-500 text-blue-200'
+    }`;
+    badge.textContent = `🔍 Soruşturma (Tur #${inv.round}): ${targetName} Parti Kartı = ${
+      inv.partyMembership === 'FASCIST' ? 'FAŞİST' : 'LİBERAL'
+    }`;
+    return badge;
   }
 
   private buildPlayersStrip(view: PlayerView): HTMLElement {
@@ -289,7 +378,7 @@ export class GameOverlay {
       const isChanc = p.id === view.chancellorId;
       const isNom = p.id === view.chancellorNomineeId;
 
-      pill.className = `px-2.5 py-1.5 rounded-xl border text-[11px] flex flex-col gap-0.5 ${
+      pill.className = `px-2 py-1 rounded-xl border text-[11px] flex flex-col gap-0.5 ${
         !p.isAlive
           ? 'opacity-40 line-through border-stone-800 bg-stone-900'
           : isPres
@@ -301,7 +390,9 @@ export class GameOverlay {
 
       const nameRow = document.createElement('div');
       nameRow.className = 'font-bold flex items-center gap-1';
-      nameRow.textContent = p.isHuman && p.name !== 'Sen' ? `${p.name} (Sen)` : p.name;
+      nameRow.textContent =
+        (p.isHuman && p.name !== 'Sen' ? `${p.name} (Sen)` : p.name) +
+        (p.wasInvestigated ? ' 🔍' : '');
       pill.appendChild(nameRow);
 
       const metaRow = document.createElement('div');
@@ -310,7 +401,7 @@ export class GameOverlay {
       if (isPres) {
         const badge = document.createElement('span');
         badge.className = 'px-1 rounded bg-amber-500 text-black font-black';
-        badge.textContent = 'BAŞKAN';
+        badge.textContent = view.isSpecialElectionRound ? 'Ö.BAŞKAN' : 'BAŞKAN';
         metaRow.appendChild(badge);
       }
       if (isChanc) {
@@ -329,7 +420,7 @@ export class GameOverlay {
         const voted = view.votedPlayerIds.includes(p.id);
         const vSpan = document.createElement('span');
         vSpan.className = voted ? 'text-amber-400 font-bold' : 'text-stone-500';
-        vSpan.textContent = voted ? '• Oy Verdi' : '• Düşünüyor';
+        vSpan.textContent = voted ? '• Oy Verdi' : '• Bekliyor';
         metaRow.appendChild(vSpan);
       } else if (view.revealedVotes?.[p.id]) {
         const v = view.revealedVotes[p.id];
@@ -363,28 +454,26 @@ export class GameOverlay {
   private buildPhaseActionPanel(view: PlayerView): HTMLElement | null {
     const panel = document.createElement('div');
     panel.className =
-      'pointer-events-auto p-4 rounded-2xl bg-stone-950/95 border border-stone-700 shadow-2xl backdrop-blur-md min-w-[290px] max-w-md space-y-3';
+      'pointer-events-auto p-3.5 rounded-2xl bg-stone-950/95 border border-stone-700 shadow-2xl backdrop-blur-md min-w-[300px] max-w-md space-y-2.5';
 
-    // 1. BAŞKAN ADAY SEÇİYOR (Sen Başkansan)
+    // 1. BAŞKAN ADAY SEÇİYOR
     if (view.phase === 'ELECTION_NOMINATION') {
       const title = document.createElement('div');
       title.className = 'text-xs font-black uppercase tracking-wider text-amber-400';
       title.textContent =
-        view.presidentId === view.yourId
-          ? 'Şansölye Adayı Seç'
-          : 'Aday Bekleniyor';
+        view.presidentId === view.yourId ? 'Şansölye Adayı Seç' : 'Aday Bekleniyor';
       panel.appendChild(title);
 
       if (view.presidentId === view.yourId) {
         const eligible = this.engine.getEligibleChancellorNominees();
         const grid = document.createElement('div');
-        grid.className = 'grid grid-cols-2 gap-2';
+        grid.className = 'grid grid-cols-2 gap-1.5';
 
         for (const cand of eligible) {
           const btn = document.createElement('button');
           btn.type = 'button';
           btn.className =
-            'px-3 py-2 rounded-xl bg-amber-500 hover:bg-amber-400 text-stone-950 font-extrabold text-xs transition cursor-pointer';
+            'px-2.5 py-2 rounded-xl bg-amber-500 hover:bg-amber-400 text-stone-950 font-extrabold text-xs transition cursor-pointer';
           btn.textContent = `${cand.name} (Seç)`;
           btn.addEventListener('click', () => {
             this.engine.nominateChancellor(view.yourId, cand.id);
@@ -401,7 +490,7 @@ export class GameOverlay {
       return panel;
     }
 
-    // 2. OYLAMA ZAMANI AÇILAN 'JA / NEIN' BUTONLARI
+    // 2. OYLAMA (JA / NEIN)
     if (view.phase === 'ELECTION_VOTING') {
       const presName = view.players.find((p) => p.id === view.presidentId)?.name ?? '';
       const nomName =
@@ -413,7 +502,7 @@ export class GameOverlay {
 
       const subtitle = document.createElement('p');
       subtitle.className = 'text-xs text-stone-200';
-      subtitle.textContent = `Başkan ${presName} + Şansölye Adayı ${nomName} hükümetini onaylıyor musun?`;
+      subtitle.textContent = `Başkan ${presName} & Şansölye Adayı ${nomName} hükümetini onaylıyor musun?`;
       panel.append(title, subtitle);
 
       const me = view.players.find((p) => p.id === view.yourId);
@@ -422,7 +511,7 @@ export class GameOverlay {
       if (!me?.isAlive) {
         const deadMsg = document.createElement('div');
         deadMsg.className = 'text-xs text-red-400 font-bold';
-        deadMsg.textContent = 'İnfaz edildiğin için oylamaya katılamazsın.';
+        deadMsg.textContent = 'İdam edildiğin için oylamaya katılamazsın.';
         panel.appendChild(deadMsg);
       } else if (alreadyVoted) {
         const waitMsg = document.createElement('div');
@@ -432,7 +521,7 @@ export class GameOverlay {
         panel.appendChild(waitMsg);
       } else {
         const btnRow = document.createElement('div');
-        btnRow.className = 'grid grid-cols-2 gap-2.5';
+        btnRow.className = 'grid grid-cols-2 gap-2';
 
         const jaBtn = document.createElement('button');
         jaBtn.type = 'button';
@@ -458,22 +547,22 @@ export class GameOverlay {
       return panel;
     }
 
-    // 3. BAŞKAN 3 KARTTAN 1'İNİ ELEYECEK
+    // 3. YASAMA — BAŞKAN (3 KARTTAN 1'İNİ AT)
     if (view.phase === 'LEGISLATIVE_PRESIDENT') {
       const title = document.createElement('div');
       title.className = 'text-xs font-black uppercase tracking-wider text-amber-400';
-      title.textContent = 'Yasama — Başkan Seçimi';
+      title.textContent = 'Yasama — Başkan Seçimi (İletişim Yasak)';
       panel.appendChild(title);
 
       if (view.presidentId === view.yourId && view.presidentHand) {
         const hint = document.createElement('p');
         hint.className = 'text-xs text-stone-300';
         hint.textContent =
-          'Çekilen 3 karttan ıskartaya atmak istediğin 1 kartı seç (diğer 2 kart Şansölyeye gider):';
+          'Çekilen 3 karttan kapalı çöpe atmak istediğin 1 kartı seç (kalan 2’si Şansölyeye gider):';
         panel.appendChild(hint);
 
         panel.appendChild(
-          this.buildPolicyChoiceRow(view.presidentHand, 'Iskartaya At', (idx) => {
+          this.buildPolicyChoiceRow(view.presidentHand, 'Çöpe At', (idx) => {
             this.engine.discardPolicyByPresident(view.yourId, idx);
           })
         );
@@ -486,17 +575,19 @@ export class GameOverlay {
       return panel;
     }
 
-    // 4. ŞANSÖLYE 2 KARTTAN 1'İNİ YASALAŞTIRACAK
+    // 4. YASAMA — ŞANSÖLYE (2 KARTTAN 1'İNİ GEÇİR VEYA VETO TEKLİF ET)
     if (view.phase === 'LEGISLATIVE_CHANCELLOR') {
       const title = document.createElement('div');
       title.className = 'text-xs font-black uppercase tracking-wider text-emerald-400';
-      title.textContent = 'Yasama — Şansölye Seçimi';
+      title.textContent = 'Yasama — Şansölye Seçimi (İletişim Yasak)';
       panel.appendChild(title);
 
       if (view.chancellorId === view.yourId && view.chancellorHand) {
         const hint = document.createElement('p');
         hint.className = 'text-xs text-stone-300';
-        hint.textContent = 'Başkandan gelen 2 karttan yürürlüğe koymak istediğini seç:';
+        hint.textContent = view.vetoRejectedThisTurn
+          ? 'Başkan Vetoyu reddetti — 2 karttan birini yasalaştırmak zorundasın:'
+          : 'Başkandan gelen 2 karttan panoya koymak istediğini seç:';
         panel.appendChild(hint);
 
         panel.appendChild(
@@ -504,6 +595,18 @@ export class GameOverlay {
             this.engine.enactPolicyByChancellor(view.yourId, idx);
           })
         );
+
+        if (view.vetoUnlocked && !view.vetoRejectedThisTurn) {
+          const vetoBtn = document.createElement('button');
+          vetoBtn.type = 'button';
+          vetoBtn.className =
+            'w-full py-2 rounded-xl bg-amber-600/20 hover:bg-amber-600/40 border border-amber-500 text-amber-300 font-black text-xs cursor-pointer transition';
+          vetoBtn.textContent = '⚖️ Veto Teklif Et (Başkan Onaylarsa Kartlar Çöpe Gider)';
+          vetoBtn.addEventListener('click', () => {
+            this.engine.proposeVeto(view.yourId);
+          });
+          panel.appendChild(vetoBtn);
+        }
       } else {
         const wait = document.createElement('p');
         wait.className = 'text-xs text-stone-300';
@@ -513,11 +616,172 @@ export class GameOverlay {
       return panel;
     }
 
-    // 5. YETKİ: DESTEYE GÖZ ATMA (3. FAŞİST)
+    // 5. VETO YANIT AŞAMASI (BAŞKAN)
+    if (view.phase === 'LEGISLATIVE_VETO_RESPONSE') {
+      const title = document.createElement('div');
+      title.className = 'text-xs font-black uppercase tracking-wider text-amber-400';
+      title.textContent = '⚖️ Veto Talebi';
+      panel.appendChild(title);
+
+      if (view.presidentId === view.yourId) {
+        const p = document.createElement('p');
+        p.className = 'text-xs text-stone-300';
+        p.textContent =
+          'Şansölye elindeki 2 kartı veto etmek istiyor. Kabul edersen her iki kart çöpe gider ve Seçim Sayacı +1 ilerler.';
+        const row = document.createElement('div');
+        row.className = 'grid grid-cols-2 gap-2';
+
+        const acc = document.createElement('button');
+        acc.type = 'button';
+        acc.className =
+          'py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-black text-xs cursor-pointer';
+        acc.textContent = '✓ Vetoyu Kabul Et';
+        acc.addEventListener('click', () => this.engine.respondToVeto(view.yourId, true));
+
+        const rej = document.createElement('button');
+        rej.type = 'button';
+        rej.className =
+          'py-2 rounded-xl bg-red-600 hover:bg-red-500 text-white font-black text-xs cursor-pointer';
+        rej.textContent = '✕ Vetoyu Reddet';
+        rej.addEventListener('click', () => this.engine.respondToVeto(view.yourId, false));
+
+        row.append(acc, rej);
+        panel.append(p, row);
+      } else {
+        const wait = document.createElement('p');
+        wait.className = 'text-xs text-stone-300';
+        wait.textContent = this.getPhaseBannerText(view);
+        panel.appendChild(wait);
+      }
+      return panel;
+    }
+
+    // 6. KART SONRASI BEYAN & ÇELİŞKİ TARTIŞMASI
+    if (view.phase === 'CLAIM_DEBATE' && view.currentClaim) {
+      const c = view.currentClaim;
+      const presName = view.players.find((p) => p.id === c.presidentId)?.name ?? '';
+      const chancName = view.players.find((p) => p.id === c.chancellorId)?.name ?? '';
+
+      const title = document.createElement('div');
+      title.className = 'text-xs font-black uppercase tracking-wider text-amber-400';
+      title.textContent = '💬 Tartışma & Kart Beyanları';
+      panel.appendChild(title);
+
+      // Çıkan politika özeti
+      const summary = document.createElement('div');
+      summary.className = 'text-[11px] space-y-1 bg-stone-900/90 p-2.5 rounded-xl border border-stone-800';
+      const line1 = document.createElement('div');
+      line1.textContent = c.presidentClaimed
+        ? `• Başkan ${presName}: "${this.formatHandText(c.presidentDrawn!)} çektim, ${this.formatHandText(c.presidentPassed!)} verdim."`
+        : `• Başkan ${presName} beyan hazırlıyor...`;
+      const line2 = document.createElement('div');
+      line2.textContent = c.chancellorClaimed
+        ? `• Şansölye ${chancName}: "Bana ${this.formatHandText(c.chancellorReceived!)} geldi."`
+        : `• Şansölye ${chancName} beyan hazırlıyor...`;
+      summary.append(line1, line2);
+      panel.appendChild(summary);
+
+      if (c.hasConflict) {
+        const alert = document.createElement('div');
+        alert.className =
+          'p-2 rounded-xl bg-red-600/30 border border-red-500 text-red-200 text-xs font-black';
+        alert.textContent = `⚡ ${c.conflictSummary}`;
+        panel.appendChild(alert);
+      }
+
+      // İnsan Başkan beyan formu
+      if (c.presidentId === view.yourId && !c.presidentClaimed) {
+        panel.appendChild(this.buildPresidentClaimForm(view.yourId));
+      } else if (c.chancellorId === view.yourId && !c.chancellorClaimed) {
+        panel.appendChild(this.buildChancellorClaimForm(view.yourId));
+      } else if (c.presidentClaimed && c.chancellorClaimed) {
+        const contBtn = document.createElement('button');
+        contBtn.type = 'button';
+        contBtn.className =
+          'w-full py-2 rounded-xl bg-amber-500 hover:bg-amber-400 text-stone-950 font-black text-xs cursor-pointer';
+        contBtn.textContent = 'Tartışmayı Bitir / Devam Et →';
+        contBtn.addEventListener('click', () => this.engine.finishClaimDebate());
+        panel.appendChild(contBtn);
+      }
+
+      return panel;
+    }
+
+    // 7. YETKİ: BAĞLILIK SORUŞTURMASI (INVESTIGATE)
+    if (view.phase === 'EXECUTIVE_INVESTIGATE') {
+      const title = document.createElement('div');
+      title.className = 'text-xs font-black uppercase tracking-wider text-purple-400';
+      title.textContent = '🔍 Bağlılık Soruşturması';
+      panel.appendChild(title);
+
+      if (view.presidentId === view.yourId) {
+        const hint = document.createElement('p');
+        hint.className = 'text-[11px] text-stone-300';
+        hint.textContent =
+          'Parti Üyeliği kartını görmek istediğin oyuncuyu seç (Hitler de Faşist görünür):';
+        const grid = document.createElement('div');
+        grid.className = 'grid grid-cols-2 gap-1.5';
+        for (const t of this.engine.getInvestigablePlayers(view.yourId)) {
+          const btn = document.createElement('button');
+          btn.type = 'button';
+          btn.className =
+            'px-2.5 py-2 rounded-xl bg-purple-600 hover:bg-purple-500 text-white font-bold text-xs cursor-pointer';
+          btn.textContent = `🔍 ${t.name}`;
+          btn.addEventListener('click', () => {
+            this.engine.investigateLoyalty(view.yourId, t.id);
+          });
+          grid.appendChild(btn);
+        }
+        panel.append(hint, grid);
+      } else {
+        const wait = document.createElement('p');
+        wait.className = 'text-xs text-stone-300';
+        wait.textContent = this.getPhaseBannerText(view);
+        panel.appendChild(wait);
+      }
+      return panel;
+    }
+
+    // 8. YETKİ: ÖZEL SEÇİM (SPECIAL_ELECTION)
+    if (view.phase === 'EXECUTIVE_SPECIAL_ELECTION') {
+      const title = document.createElement('div');
+      title.className = 'text-xs font-black uppercase tracking-wider text-amber-400';
+      title.textContent = '🗳️ Özel Seçim Yetkisi';
+      panel.appendChild(title);
+
+      if (view.presidentId === view.yourId) {
+        const hint = document.createElement('p');
+        hint.className = 'text-[11px] text-stone-300';
+        hint.textContent = 'Sıradaki turun Başkan adayını seç (sonrasında normal sıra devam eder):';
+        const grid = document.createElement('div');
+        grid.className = 'grid grid-cols-2 gap-1.5';
+        for (const t of view.players) {
+          if (!t.isAlive || t.id === view.yourId) continue;
+          const btn = document.createElement('button');
+          btn.type = 'button';
+          btn.className =
+            'px-2.5 py-2 rounded-xl bg-amber-500 hover:bg-amber-400 text-stone-950 font-black text-xs cursor-pointer';
+          btn.textContent = `★ ${t.name}`;
+          btn.addEventListener('click', () => {
+            this.engine.callSpecialElection(view.yourId, t.id);
+          });
+          grid.appendChild(btn);
+        }
+        panel.append(hint, grid);
+      } else {
+        const wait = document.createElement('p');
+        wait.className = 'text-xs text-stone-300';
+        wait.textContent = this.getPhaseBannerText(view);
+        panel.appendChild(wait);
+      }
+      return panel;
+    }
+
+    // 9. YETKİ: DESTEYE GÖZ ATMA (POLICY_PEEK)
     if (view.phase === 'EXECUTIVE_PEEK') {
       const title = document.createElement('div');
       title.className = 'text-xs font-black uppercase tracking-wider text-amber-400';
-      title.textContent = 'Başkan Yetkisi — Deste İnceleme';
+      title.textContent = '👁️ Kart İnceleme (Üst 3 Kart)';
       panel.appendChild(title);
 
       if (view.presidentId === view.yourId && view.peekedCards) {
@@ -551,22 +815,22 @@ export class GameOverlay {
       return panel;
     }
 
-    // 6. YETKİ: İNFAZ (4. VE 5. FAŞİST)
+    // 10. YETKİ: İDAM (EXECUTION)
     if (view.phase === 'EXECUTIVE_EXECUTION') {
       const title = document.createElement('div');
       title.className = 'text-xs font-black uppercase tracking-wider text-red-400';
-      title.textContent = 'Başkan Yetkisi — İnfaz';
+      title.textContent = '💀 İdam Yetkisi';
       panel.appendChild(title);
 
       if (view.presidentId === view.yourId) {
         const grid = document.createElement('div');
-        grid.className = 'grid grid-cols-2 gap-2';
+        grid.className = 'grid grid-cols-2 gap-1.5';
         for (const target of view.players) {
           if (!target.isAlive || target.id === view.yourId) continue;
           const btn = document.createElement('button');
           btn.type = 'button';
           btn.className =
-            'px-3 py-2 rounded-xl bg-red-600 hover:bg-red-500 text-white font-black text-xs transition cursor-pointer';
+            'px-2.5 py-2 rounded-xl bg-red-600 hover:bg-red-500 text-white font-black text-xs transition cursor-pointer';
           btn.textContent = `💀 ${target.name}`;
           btn.addEventListener('click', () => {
             this.engine.executePlayer(view.yourId, target.id);
@@ -583,7 +847,7 @@ export class GameOverlay {
       return panel;
     }
 
-    // 7. OYUN SONU
+    // 11. OYUN SONU
     if (view.phase === 'GAME_OVER') {
       const isLibWin = view.winner === 'LIBERAL';
       const title = document.createElement('div');
@@ -602,8 +866,8 @@ export class GameOverlay {
         'w-full py-2.5 rounded-xl bg-amber-500 hover:bg-amber-400 text-stone-950 font-black text-xs cursor-pointer';
       againBtn.textContent = '🔄 Yeniden Oyna';
       againBtn.addEventListener('click', () => {
-        this.roleCardOpen = false;
-        this.engine.startNewGame({ humanName: 'Sen' });
+        this.roleEnvelopeOpen = false;
+        this.engine.startNewGame({ playerCount: this.selectedCount, humanName: 'Sen' });
       });
 
       panel.append(title, reason, againBtn);
@@ -611,6 +875,109 @@ export class GameOverlay {
     }
 
     return null;
+  }
+
+  private buildPresidentClaimForm(presidentId: string): HTMLElement {
+    const box = document.createElement('div');
+    box.className = 'space-y-2 text-xs';
+
+    const row = document.createElement('div');
+    row.className = 'grid grid-cols-2 gap-1.5';
+
+    const drawnSel = document.createElement('select');
+    drawnSel.className = 'bg-stone-900 border border-stone-700 rounded-lg p-1.5 text-xs';
+    [
+      [3, 'Çekilen: 3L, 0F'],
+      [2, 'Çekilen: 2L, 1F'],
+      [1, 'Çekilen: 1L, 2F'],
+      [0, 'Çekilen: 0L, 3F'],
+    ].forEach(([val, lbl]) => {
+      const o = document.createElement('option');
+      o.value = String(val);
+      o.textContent = String(lbl);
+      if (val === this.claimDrawnLib) o.selected = true;
+      drawnSel.appendChild(o);
+    });
+    drawnSel.addEventListener('change', () => {
+      this.claimDrawnLib = Number(drawnSel.value);
+    });
+
+    const passedSel = document.createElement('select');
+    passedSel.className = 'bg-stone-900 border border-stone-700 rounded-lg p-1.5 text-xs';
+    [
+      [2, 'Verilen: 2L, 0F'],
+      [1, 'Verilen: 1L, 1F'],
+      [0, 'Verilen: 0L, 2F'],
+    ].forEach(([val, lbl]) => {
+      const o = document.createElement('option');
+      o.value = String(val);
+      o.textContent = String(lbl);
+      if (val === this.claimPassedLib) o.selected = true;
+      passedSel.appendChild(o);
+    });
+    passedSel.addEventListener('change', () => {
+      this.claimPassedLib = Number(passedSel.value);
+    });
+
+    row.append(drawnSel, passedSel);
+
+    const submit = document.createElement('button');
+    submit.type = 'button';
+    submit.className =
+      'w-full py-2 rounded-xl bg-amber-500 hover:bg-amber-400 text-stone-950 font-black text-xs cursor-pointer';
+    submit.textContent = 'Başkan Beyanını Masaya Sun';
+    submit.addEventListener('click', () => {
+      const drawn: Policy[] = [
+        ...Array<Policy>(this.claimDrawnLib).fill('LIBERAL'),
+        ...Array<Policy>(3 - this.claimDrawnLib).fill('FASCIST'),
+      ];
+      const passed: Policy[] = [
+        ...Array<Policy>(this.claimPassedLib).fill('LIBERAL'),
+        ...Array<Policy>(2 - this.claimPassedLib).fill('FASCIST'),
+      ];
+      this.engine.submitPresidentClaim(presidentId, drawn, passed);
+    });
+
+    box.append(row, submit);
+    return box;
+  }
+
+  private buildChancellorClaimForm(chancellorId: string): HTMLElement {
+    const box = document.createElement('div');
+    box.className = 'space-y-2 text-xs';
+
+    const sel = document.createElement('select');
+    sel.className = 'w-full bg-stone-900 border border-stone-700 rounded-lg p-1.5 text-xs';
+    [
+      [2, 'Bana 2 Liberal Geldi'],
+      [1, 'Bana 1 Liberal, 1 Faşist Geldi'],
+      [0, 'Bana 2 Faşist Geldi'],
+    ].forEach(([val, lbl]) => {
+      const o = document.createElement('option');
+      o.value = String(val);
+      o.textContent = String(lbl);
+      if (val === this.claimRecLib) o.selected = true;
+      sel.appendChild(o);
+    });
+    sel.addEventListener('change', () => {
+      this.claimRecLib = Number(sel.value);
+    });
+
+    const submit = document.createElement('button');
+    submit.type = 'button';
+    submit.className =
+      'w-full py-2 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-stone-950 font-black text-xs cursor-pointer';
+    submit.textContent = 'Şansölye Beyanını Masaya Sun';
+    submit.addEventListener('click', () => {
+      const received: Policy[] = [
+        ...Array<Policy>(this.claimRecLib).fill('LIBERAL'),
+        ...Array<Policy>(2 - this.claimRecLib).fill('FASCIST'),
+      ];
+      this.engine.submitChancellorClaim(chancellorId, received);
+    });
+
+    box.append(sel, submit);
+    return box;
   }
 
   private buildPolicyChoiceRow(
@@ -674,12 +1041,14 @@ export class GameOverlay {
     if (this.logsOpen) {
       const list = document.createElement('div');
       list.className = 'max-h-36 overflow-y-auto p-2.5 space-y-1 text-[11px] font-mono';
-      const recent = view.logs.slice(-10);
+      const recent = view.logs.slice(-12);
       for (const entry of recent) {
         const line = document.createElement('div');
         line.className =
           entry.category === 'victory'
             ? 'text-amber-300 font-bold'
+            : entry.category === 'claim'
+            ? 'text-rose-300 font-semibold'
             : entry.category === 'executive'
             ? 'text-red-300'
             : entry.category === 'legislative'
@@ -695,16 +1064,22 @@ export class GameOverlay {
     return box;
   }
 
+  private formatHandText(cards: Policy[]): string {
+    const lib = cards.filter((c) => c === 'LIBERAL').length;
+    const fasc = cards.length - lib;
+    return `${lib}L / ${fasc}F`;
+  }
+
   private translateWinReason(reason: PlayerView['winReason']): string {
     switch (reason) {
       case 'LIBERAL_POLICIES':
-        return '5 Liberal politika başarıyla yasalaştı!';
+        return 'Liberal panosuna 5 Liberal politika yerleştirildi!';
       case 'FASCIST_POLICIES':
-        return '6 Faşist politika yürürlüğe girdi!';
+        return 'Faşist panosuna 6 Faşist politika yerleştirildi!';
       case 'HITLER_CHANCELLOR':
-        return '3+ Faşist politika sonrası Hitler Şansölye seçildi!';
+        return '3+ Faşist politika sonrası Hitler Şansölye olarak seçildi!';
       case 'HITLER_EXECUTED':
-        return 'Hitler tespit edilip infaz edildi!';
+        return 'İdam yetkisiyle Hitler öldürüldü!';
       default:
         return '';
     }

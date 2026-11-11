@@ -1,6 +1,20 @@
-# 🎲 Secret Hitler 3D (Silent Protocol) - v1.0.0
+# 🎲 Secret Hitler 3D (Silent Protocol) - v1.1.0
 
-> Strict **"Headless Engine"** mimarisiyle ayrıştırılmış, Vite + TypeScript + Vanilla Three.js + TailwindCSS tabanlı tam ekran **3D Secret Hitler** masaüstü web oyunu (`5 kişilik çevrimdışı / 4 yapay zeka botlu mod`).
+> Strict **"Headless Engine"** mimarisiyle ayrıştırılmış, Vite + TypeScript + Vanilla Three.js + TailwindCSS tabanlı tam ekran **3D Secret Hitler** masaüstü web oyunu (`5–10 kişilik tam resmi kurallar`).
+
+---
+
+## 📌 v1.1.0 Tam Kural Seti & Mekanikler
+- **5 ila 10 Oyuncu Desteği & Gece Bilgi Dinamiği**:
+  - **5–6 Kişi**: Faşist ve Hitler birbirini tanır.
+  - **7–10 Kişi**: Faşistler birbirini ve Hitler'i görür; **Hitler takım arkadaşlarını bilmez**.
+  - Her oyuncu **Gizli Rol Kartı** (`LIBERAL | FASCIST | HITLER`) ile **Parti Üyeliği Kartı** (`LIBERAL | FAŞİST` — Hitler'de de `FAŞİST` yazar) alır.
+- **Oyuncu Sayısına Göre Resmi Yürütme Yetkileri (`Executive Actions`)**:
+  - `5–6`: 3. Faşist `Policy Peek` (Üst 3 Kart), 4. ve 5. Faşist `Execution` (İdam).
+  - `7–8`: 2. `Investigate Loyalty`, 3. `Special Election`, 4.–5. `Execution`.
+  - `9–10`: 1.–2. `Investigate Loyalty`, 3. `Special Election`, 4.–5. `Execution`.
+- **Veto Yetkisi**: 5. Faşist politika sonrasında Şansölye veto teklif edebilir; Başkan kabul ederse her iki kart çöpe gider ve Seçim Sayacı `+1` ilerler.
+- **Yasama Sonrası Beyan & Çelişki Tartışması (`CLAIM_DEBATE`)**: Politik kart masaya konduktan sonra Başkan/Şansölye çekilen/verilen kartları beyan eder, çelişkiler yakalanır ve bot hafızasını etkiler.
 
 ---
 

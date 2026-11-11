@@ -8,6 +8,7 @@ import type {
   GamePhase,
   GameState,
   LogEntry,
+  PartyMembership,
   Player,
   PlayerView,
   Policy,
@@ -18,33 +19,70 @@ import type {
 } from './types.ts';
 
 export interface GameEngineOptions {
-  /** Tekrarlanabilir testler için özel PRNG fonksiyonu (varsayılan Math.random) */
+  /** 5 ila 10 oyuncu sayısı (varsayılan: 5) */
+  playerCount?: number;
+  /** Tekrarlanabilir testler için özel PRNG fonksiyonu */
   rng?: () => number;
   /** İnsan oyuncunun adı */
   humanName?: string;
-  /** Başlangıç Başkan indeksi (belirtilmezse rastgele seçilir) */
+  /** Başlangıç Başkan indeksi */
   startingPresidentIndex?: number;
   /** Özel bot isimleri */
   botNames?: string[];
-  /** Otomatik oyun kurulumu yapılsın mı (varsayılan true) */
+  /** Otomatik başlatılsın mı (varsayılan true) */
   autoStart?: boolean;
+  /** Yasama sonrası beyan/tartışma fazını kullan (varsayılan true) */
+  enableClaimDebate?: boolean;
 }
 
-const DEFAULT_BOT_NAMES = ['Ajan Kaya', 'Mühendis Ece', 'Analist Can', 'Operatör Deniz'];
+const DEFAULT_BOT_NAMES = [
+  'Ajan Kaya',
+  'Mühendis Ece',
+  'Analist Can',
+  'Operatör Deniz',
+  'Kriptolog Bora',
+  'Diplomat Zeynep',
+  'Dedektif Arda',
+  'Arşivci Selin',
+  'Gözcü Kerem',
+];
+
+const ROLE_DISTRIBUTIONS: Record<number, { liberals: number; fascists: number }> = {
+  5: { liberals: 3, fascists: 1 },
+  6: { liberals: 4, fascists: 1 },
+  7: { liberals: 4, fascists: 2 },
+  8: { liberals: 5, fascists: 2 },
+  9: { liberals: 5, fascists: 3 },
+  10: { liberals: 6, fascists: 3 },
+};
+
+/** 1..5 arası (indeks 0..4) Faşist politika yuvalarının yetki haritası (6. yuva = Faşist zaferi) */
+export function getBoardPowersForPlayerCount(playerCount: number): ExecutivePower[] {
+  if (playerCount <= 6) {
+    return ['NONE', 'NONE', 'POLICY_PEEK', 'EXECUTION', 'EXECUTION'];
+  }
+  if (playerCount <= 8) {
+    return ['NONE', 'INVESTIGATE', 'SPECIAL_ELECTION', 'EXECUTION', 'EXECUTION'];
+  }
+  return ['INVESTIGATE', 'INVESTIGATE', 'SPECIAL_ELECTION', 'EXECUTION', 'EXECUTION'];
+}
 
 /**
- * Saf, arayüzden tamamen bağımsız (Headless) 5-Kişilik Secret Hitler Kural Motoru.
- * Görsel/Three.js/DOM kodu içermez; durum değişikliklerini EventEmitter üzerinden yayar.
+ * 5–10 Kişilik Secret Hitler Tam Kural Motoru (Headless State Machine).
+ * Sıfır Three.js, sıfır DOM bağımlılığı.
  */
 export class GameEngine {
   public readonly events = new EventEmitter<EngineEventMap>();
   private readonly rng: () => number;
   private readonly bots: BotController;
+  private enableClaimDebate: boolean;
+  private pendingPostClaimPower: ExecutivePower = 'NONE';
   private state: GameState;
 
   constructor(options: GameEngineOptions = {}) {
     this.rng = options.rng ?? Math.random;
     this.bots = new BotController(this.rng);
+    this.enableClaimDebate = options.enableClaimDebate ?? true;
     this.state = this.createEmptyState();
 
     if (options.autoStart !== false) {
@@ -56,9 +94,12 @@ export class GameEngine {
     return {
       phase: 'SETUP',
       round: 0,
+      playerCount: 5,
       players: [],
       presidentIndex: 0,
       presidentId: '',
+      specialElectionReturnIndex: null,
+      isSpecialElectionRound: false,
       chancellorNomineeId: null,
       chancellorId: null,
       lastElectedPresidentId: null,
@@ -68,65 +109,75 @@ export class GameEngine {
       electionTracker: 0,
       liberalPolicies: 0,
       fascistPolicies: 0,
+      vetoUnlocked: false,
+      vetoRejectedThisTurn: false,
       drawPile: [],
       discardPile: [],
+      actualPresidentDrawn: [],
       presidentHand: [],
       chancellorHand: [],
       peekedCards: [],
       activeExecutivePower: 'NONE',
+      boardPowers: getBoardPowersForPlayerCount(5),
+      investigatedPlayerIds: [],
+      lastInvestigation: null,
+      currentClaim: null,
+      claimHistory: [],
       winner: null,
       winReason: null,
       logs: [],
     };
   }
 
-  /**
-   * 5 kişilik oyunu başlatır: 3 Liberal, 1 Faşist, 1 Hitler + 17 kartlık politika destesi (6 Liberal, 11 Faşist).
-   */
   startNewGame(options: GameEngineOptions = {}): GameState {
+    const rawCount = options.playerCount ?? this.state.playerCount ?? 5;
+    const playerCount = Math.min(10, Math.max(5, Math.round(rawCount)));
+    if (options.enableClaimDebate !== undefined) {
+      this.enableClaimDebate = options.enableClaimDebate;
+    }
+
     const humanName = options.humanName?.trim() || 'Sen';
     const botNames = options.botNames ?? DEFAULT_BOT_NAMES;
+    const dist = ROLE_DISTRIBUTIONS[playerCount];
 
     const roles: Role[] = this.shuffle([
-      'LIBERAL',
-      'LIBERAL',
-      'LIBERAL',
-      'FASCIST',
+      ...Array<Role>(dist.liberals).fill('LIBERAL'),
+      ...Array<Role>(dist.fascists).fill('FASCIST'),
       'HITLER',
     ]);
 
-    const players: Player[] = [
-      {
-        id: 'human',
-        name: humanName,
-        seatIndex: 0,
-        isHuman: true,
+    const players: Player[] = Array.from({ length: playerCount }, (_, idx) => {
+      const role = roles[idx];
+      const partyMembership: PartyMembership = role === 'LIBERAL' ? 'LIBERAL' : 'FASCIST';
+      return {
+        id: idx === 0 ? 'human' : `bot-${idx}`,
+        name: idx === 0 ? humanName : botNames[idx - 1] ?? `Oyuncu ${idx + 1}`,
+        seatIndex: idx,
+        isHuman: idx === 0,
         isAlive: true,
-        role: roles[0],
-      },
-      ...botNames.slice(0, 4).map((name, idx) => ({
-        id: `bot-${idx + 1}`,
-        name,
-        seatIndex: idx + 1,
-        isHuman: false,
-        isAlive: true,
-        role: roles[idx + 1],
-      })),
-    ];
+        role,
+        partyMembership,
+      };
+    });
 
     const startIdx =
       options.startingPresidentIndex !== undefined
-        ? ((options.startingPresidentIndex % 5) + 5) % 5
-        : Math.floor(this.rng() * 5);
+        ? ((options.startingPresidentIndex % playerCount) + playerCount) % playerCount
+        : Math.floor(this.rng() * playerCount);
 
-    const drawPile = this.buildInitialDeck();
+    this.bots.resetMemory();
+    this.pendingPostClaimPower = 'NONE';
+    const boardPowers = getBoardPowersForPlayerCount(playerCount);
 
     this.state = {
       phase: 'ELECTION_NOMINATION',
       round: 1,
+      playerCount,
       players,
       presidentIndex: startIdx,
       presidentId: players[startIdx].id,
+      specialElectionReturnIndex: null,
+      isSpecialElectionRound: false,
       chancellorNomineeId: null,
       chancellorId: null,
       lastElectedPresidentId: null,
@@ -136,19 +187,32 @@ export class GameEngine {
       electionTracker: 0,
       liberalPolicies: 0,
       fascistPolicies: 0,
-      drawPile,
+      vetoUnlocked: false,
+      vetoRejectedThisTurn: false,
+      drawPile: this.buildInitialDeck(),
       discardPile: [],
+      actualPresidentDrawn: [],
       presidentHand: [],
       chancellorHand: [],
       peekedCards: [],
       activeExecutivePower: 'NONE',
+      boardPowers,
+      investigatedPlayerIds: [],
+      lastInvestigation: null,
+      currentClaim: null,
+      claimHistory: [],
       winner: null,
       winReason: null,
       logs: [],
     };
 
+    const nightRuleNote =
+      playerCount <= 6
+        ? '5–6 kişilik mod: Faşist ve Hitler birbirini tanır.'
+        : '7–10 kişilik mod: Faşistler Hitler’i görür, ancak Hitler takım arkadaşlarını bilmez!';
+
     this.appendLog(
-      `Oyun başladı! 5 oyuncu (3 Liberal, 1 Faşist, 1 Hitler) ve 17 kartlı deste (6 Liberal, 11 Faşist) hazır.`,
+      `${playerCount} kişilik oyun başladı! (${dist.liberals} Liberal, ${dist.fascists} Faşist, 1 Hitler) — ${nightRuleNote}`,
       'info'
     );
     this.appendLog(
@@ -178,12 +242,13 @@ export class GameEngine {
     return copy;
   }
 
-  /** Test ve hata ayıklama için mevcut tam state kopyasını döner. */
   getState(): GameState {
     return structuredClone(this.state);
   }
 
-  /** Bir oyuncunun UI/Renderer'da görebileceği rol ve el bilgisini gizlilik sınırlarıyla üretir. */
+  /**
+   * 5–6 kişilik ve 7–10 kişilik bilgi dağılımına birebir uyan gizli oyuncu görünümü.
+   */
   getPlayerView(viewerId: string): PlayerView {
     const s = this.state;
     const viewer = s.players.find((p) => p.id === viewerId);
@@ -192,15 +257,25 @@ export class GameEngine {
     }
 
     const isGameOver = s.phase === 'GAME_OVER';
-    const canSeeSecretTeam = viewer.role === 'FASCIST' || viewer.role === 'HITLER';
+    const hitlerKnowsAllies = s.playerCount <= 6;
 
-    const knownFascists =
-      canSeeSecretTeam || isGameOver
-        ? s.players.filter((p) => p.role === 'FASCIST').map((p) => p.id)
-        : [];
-    const hitlerPlayer = s.players.find((p) => p.role === 'HITLER') ?? null;
-    const knownHitlerId =
-      (canSeeSecretTeam || isGameOver) && hitlerPlayer ? hitlerPlayer.id : null;
+    let knownFascists: string[] = [];
+    let knownHitlerId: string | null = null;
+
+    if (isGameOver) {
+      knownFascists = s.players.filter((p) => p.role === 'FASCIST').map((p) => p.id);
+      knownHitlerId = s.players.find((p) => p.role === 'HITLER')?.id ?? null;
+    } else if (viewer.role === 'FASCIST') {
+      // Faşistler daima diğer Faşistleri ve Hitler'i bilir
+      knownFascists = s.players.filter((p) => p.role === 'FASCIST').map((p) => p.id);
+      knownHitlerId = s.players.find((p) => p.role === 'HITLER')?.id ?? null;
+    } else if (viewer.role === 'HITLER') {
+      knownHitlerId = viewer.id;
+      if (hitlerKnowsAllies) {
+        // 5-6 kişide Hitler kendi Faşistini görür; 7-10 kişide GÖREMEZ!
+        knownFascists = s.players.filter((p) => p.role === 'FASCIST').map((p) => p.id);
+      }
+    }
 
     const players: PublicPlayer[] = s.players.map((p) => ({
       id: p.id,
@@ -208,26 +283,38 @@ export class GameEngine {
       seatIndex: p.seatIndex,
       isHuman: p.isHuman,
       isAlive: p.isAlive,
+      wasInvestigated: s.investigatedPlayerIds.includes(p.id),
       revealedRole: isGameOver || p.id === viewerId ? p.role : undefined,
     }));
 
     return {
       phase: s.phase,
       round: s.round,
+      playerCount: s.playerCount,
       yourId: viewerId,
       yourRole: viewer.role,
+      yourParty: viewer.partyMembership,
       knownFascists,
       knownHitlerId,
+      hitlerKnowsAllies,
       players,
       presidentId: s.presidentId,
+      isSpecialElectionRound: s.isSpecialElectionRound,
       chancellorNomineeId: s.chancellorNomineeId,
       chancellorId: s.chancellorId,
       votedPlayerIds: Object.keys(s.votes),
-      revealedVotes: s.phase !== 'ELECTION_VOTING' && s.lastElectionResult ? { ...s.lastElectionResult.votes } : null,
-      lastElectionResult: s.lastElectionResult ? structuredClone(s.lastElectionResult) : null,
+      revealedVotes:
+        s.phase !== 'ELECTION_VOTING' && s.lastElectionResult
+          ? { ...s.lastElectionResult.votes }
+          : null,
+      lastElectionResult: s.lastElectionResult
+        ? structuredClone(s.lastElectionResult)
+        : null,
       electionTracker: s.electionTracker,
       liberalPolicies: s.liberalPolicies,
       fascistPolicies: s.fascistPolicies,
+      vetoUnlocked: s.vetoUnlocked,
+      vetoRejectedThisTurn: s.vetoRejectedThisTurn,
       drawPileCount: s.drawPile.length,
       discardPileCount: s.discardPile.length,
       presidentHand:
@@ -235,7 +322,9 @@ export class GameEngine {
           ? [...s.presidentHand]
           : null,
       chancellorHand:
-        s.phase === 'LEGISLATIVE_CHANCELLOR' && viewerId === s.chancellorId
+        (s.phase === 'LEGISLATIVE_CHANCELLOR' && viewerId === s.chancellorId) ||
+        (s.phase === 'LEGISLATIVE_VETO_RESPONSE' &&
+          (viewerId === s.chancellorId || viewerId === s.presidentId))
           ? [...s.chancellorHand]
           : null,
       peekedCards:
@@ -243,6 +332,14 @@ export class GameEngine {
           ? [...s.peekedCards]
           : null,
       activeExecutivePower: s.activeExecutivePower,
+      boardPowers: [...s.boardPowers],
+      lastInvestigation:
+        s.lastInvestigation &&
+        (s.lastInvestigation.investigatorId === viewerId || isGameOver)
+          ? { ...s.lastInvestigation }
+          : null,
+      currentClaim: s.currentClaim ? structuredClone(s.currentClaim) : null,
+      claimHistory: structuredClone(s.claimHistory),
       winner: s.winner,
       winReason: s.winReason,
       logs: [...s.logs],
@@ -259,13 +356,7 @@ export class GameEngine {
     return p;
   }
 
-  /**
-   * Secret Hitler term-limit kurallarına göre aday gösterilebilecek Şansölye adayları:
-   * - Hayatta olmalı
-   * - Başkanın kendisi olamaz
-   * - Önceki seçilmiş Şansölye olamaz
-   * - Eğer hayatta > 5 oyuncu varsa, önceki seçilmiş Başkan da olamaz (5 kişide yalnızca son Şansölye kuralı uygulanır)
-   */
+  /** Hayatta >5 oyuncu varsa hem önceki Başkan hem önceki Şansölye engellenir; <=5 iken yalnız son Şansölye */
   getEligibleChancellorNominees(): Player[] {
     const s = this.state;
     const alive = this.getAlivePlayers();
@@ -281,30 +372,35 @@ export class GameEngine {
     });
   }
 
+  getInvestigablePlayers(presidentId: string): Player[] {
+    return this.getAlivePlayers().filter(
+      (p) => p.id !== presidentId && !this.state.investigatedPlayerIds.includes(p.id)
+    );
+  }
+
   // =========================================================================
-  // DURUM MAKİNESİ GEÇİŞLERİ (STATE MACHINE TRANSITIONS)
+  // 1. SEÇİM AŞAMASI (NOMINATION & JA/NEIN VOTING)
   // =========================================================================
 
-  /** 1. ADIM: Başkan Şansölye adayını belirler */
   nominateChancellor(presidentId: string, nomineeId: string): void {
     this.assertPhase('ELECTION_NOMINATION');
     if (this.state.presidentId !== presidentId) {
       throw new Error(`Yalnızca aktif Başkan (${this.state.presidentId}) aday gösterebilir.`);
     }
 
-    const eligible = this.getEligibleChancellorNominees();
-    const nominee = eligible.find((p) => p.id === nomineeId);
+    const nominee = this.getEligibleChancellorNominees().find((p) => p.id === nomineeId);
     if (!nominee) {
-      throw new Error(`Geçersiz veya dönem sınırı engelli Şansölye adayı: ${nomineeId}`);
+      throw new Error(`Geçersiz veya dönem yasaklı Şansölye adayı: ${nomineeId}`);
     }
 
     const prevPhase = this.state.phase;
     this.state.chancellorNomineeId = nominee.id;
     this.state.votes = {};
+    this.state.vetoRejectedThisTurn = false;
     this.state.phase = 'ELECTION_VOTING';
 
     this.appendLog(
-      `Başkan ${this.getCurrentPresident().name}, ${nominee.name}'yi Şansölye adayı gösterdi. Oylama (Ja/Nein) başladı.`,
+      `Başkan ${this.getCurrentPresident().name}, ${nominee.name}'yi Şansölye adayı gösterdi. Oylama (Ja / Nein)!`,
       'election'
     );
     this.events.emit('ELECTION_NOMINATED', {
@@ -316,7 +412,6 @@ export class GameEngine {
     this.emitStateChanged();
   }
 
-  /** 2. ADIM: Hayattaki oyuncular JA veya NEIN oyu kullanır */
   castVote(playerId: string, vote: Vote): void {
     this.assertPhase('ELECTION_VOTING');
     const voter = this.state.players.find((p) => p.id === playerId);
@@ -369,12 +464,13 @@ export class GameEngine {
         neinCount,
         votes: votesSnapshot,
         electionTracker: s.electionTracker,
+        wasSpecialElection: s.isSpecialElectionRound,
       };
       s.lastElectionResult = result;
       s.chancellorNomineeId = null;
 
       this.appendLog(
-        `Oylama REDDEDİLDİ (${jaCount} Ja / ${neinCount} Nein). Kaos sayacı: ${s.electionTracker}/3.`,
+        `Oylama REDDEDİLDİ (${jaCount} Ja / ${neinCount} Nein). Seçim Sayacı: ${s.electionTracker}/3.`,
         'election'
       );
       this.events.emit('ELECTION_RESOLVED', result);
@@ -384,7 +480,7 @@ export class GameEngine {
         return;
       }
 
-      this.rotatePresidentClockwise();
+      this.advancePresidentTurn();
       s.round++;
       s.phase = 'ELECTION_NOMINATION';
       this.appendLog(
@@ -396,7 +492,7 @@ export class GameEngine {
       return;
     }
 
-    // OYLAMA KABUL EDİLDİ!
+    // Hükümet seçildi!
     s.electionTracker = 0;
     s.chancellorId = nomineeId;
     s.chancellorNomineeId = null;
@@ -412,16 +508,17 @@ export class GameEngine {
       neinCount,
       votes: votesSnapshot,
       electionTracker: 0,
+      wasSpecialElection: s.isSpecialElectionRound,
     };
     s.lastElectionResult = result;
 
     this.appendLog(
-      `Oylama KABUL EDİLDİ (${jaCount} Ja / ${neinCount} Nein)! Hükümet: Başkan ${this.getCurrentPresident().name} & Şansölye ${nominee.name}.`,
+      `Hükümet KURULDU (${jaCount} Ja / ${neinCount} Nein): Başkan ${this.getCurrentPresident().name} & Şansölye ${nominee.name}.`,
       'election'
     );
     this.events.emit('ELECTION_RESOLVED', result);
 
-    // Hitler'in Şansölye seçilmesiyle Faşist zaferi kontrolü (3+ Faşist politika sonrasında)
+    // Hitler kontrolü (3+ Faşist politika sonrası seçilen Şansölye Hitler ise Faşistler anında kazanır!)
     if (s.fascistPolicies >= 3 && nominee.role === 'HITLER') {
       this.finishGame(
         'FASCIST',
@@ -431,15 +528,16 @@ export class GameEngine {
       return;
     }
 
-    // Yasama Aşamasına geç: Deste 3'ten azsa karıştır ve 3 kart çek
+    // Yasama Başlangıcı: Deste 3'ten azsa karıştır
     this.ensureDeckHasCards(3);
     const drawn = s.drawPile.splice(0, 3);
+    s.actualPresidentDrawn = [...drawn];
     s.presidentHand = drawn;
     s.chancellorHand = [];
     s.phase = 'LEGISLATIVE_PRESIDENT';
 
     this.appendLog(
-      `Başkan ${this.getCurrentPresident().name} desteden 3 politika kartı çekti (Destede kalan: ${s.drawPile.length}).`,
+      `Başkan ${this.getCurrentPresident().name} kapalı desteden 3 Politika Kartı çekti (Kalan: ${s.drawPile.length}).`,
       'legislative'
     );
     this.events.emit('CARDS_DRAWN', {
@@ -457,19 +555,18 @@ export class GameEngine {
     this.ensureDeckHasCards(1);
     const topPolicy = s.drawPile.shift()!;
     s.electionTracker = 0;
-    // Kaos sonrası dönem limitleri sıfırlanır (resmi Secret Hitler kuralı)
     s.lastElectedPresidentId = null;
     s.lastElectedChancellorId = null;
     s.chancellorId = null;
 
     this.appendLog(
-      `KAOS (3/3 Red)! Destedeki en üst kart (${topPolicy}) doğrudan yürürlüğe girdi ve dönem sınırları sıfırlandı.`,
+      `KAOS (3/3 Red)! Destedeki en üst politika (${topPolicy}) doğrudan yürürlüğe girdi ve dönem yasakları kalktı.`,
       'executive'
     );
     this.enactPolicyToBoard(topPolicy, true);
 
     if (s.phase !== 'GAME_OVER') {
-      this.rotatePresidentClockwise();
+      this.advancePresidentTurn();
       s.round++;
       s.phase = 'ELECTION_NOMINATION';
       this.emitPhaseChange(prevPhase, 'ELECTION_NOMINATION');
@@ -477,12 +574,15 @@ export class GameEngine {
     this.emitStateChanged();
   }
 
-  /** 3. ADIM: Başkan 3 karttan 1'ini discard eder, kalan 2'sini Şansölyeye verir */
+  // =========================================================================
+  // 2. YASAMA & VETO AŞAMASI
+  // =========================================================================
+
   discardPolicyByPresident(presidentId: string, cardIndex: number): void {
     this.assertPhase('LEGISLATIVE_PRESIDENT');
     const s = this.state;
     if (s.presidentId !== presidentId) {
-      throw new Error(`Yalnızca aktif Başkan (${s.presidentId}) kart eleyebilir.`);
+      throw new Error(`Yalnızca aktif Başkan (${s.presidentId}) kart atabilir.`);
     }
     if (!Number.isInteger(cardIndex) || cardIndex < 0 || cardIndex >= s.presidentHand.length) {
       throw new Error(`Geçersiz kart indeksi: ${cardIndex}`);
@@ -497,7 +597,7 @@ export class GameEngine {
 
     const chancellor = s.players.find((p) => p.id === s.chancellorId)!;
     this.appendLog(
-      `Başkan ${this.getCurrentPresident().name} 1 kart eledi ve 2 kartı Şansölye ${chancellor.name}'ye verdi.`,
+      `Başkan ${this.getCurrentPresident().name} 1 kartı kapalı çöpe attı, 2 kartı Şansölye ${chancellor.name}'ye verdi.`,
       'legislative'
     );
     this.events.emit('POLICY_DISCARDED', {
@@ -509,7 +609,6 @@ export class GameEngine {
     this.emitStateChanged();
   }
 
-  /** 4. ADIM: Şansölye 2 karttan 1'ini yasalaştırır, diğerini discard eder */
   enactPolicyByChancellor(chancellorId: string, cardIndex: number): void {
     this.assertPhase('LEGISLATIVE_CHANCELLOR');
     const s = this.state;
@@ -523,6 +622,8 @@ export class GameEngine {
     const prevPhase = s.phase;
     const enacted = s.chancellorHand[cardIndex];
     const discarded = s.chancellorHand[1 - cardIndex];
+    const receivedCopy = [...s.chancellorHand];
+
     s.discardPile.push(discarded);
     s.chancellorHand = [];
 
@@ -537,52 +638,370 @@ export class GameEngine {
       return;
     }
 
-    // Faşist politika yasalaştıysa 5-kişilik Executive Power kilometre taşlarını kontrol et
-    if (enacted === 'FASCIST') {
-      const power = this.getExecutivePowerForFascistCount(s.fascistPolicies);
-      if (power === 'POLICY_PEEK') {
-        this.ensureDeckHasCards(3);
-        s.peekedCards = s.drawPile.slice(0, 3);
-        s.activeExecutivePower = 'POLICY_PEEK';
-        s.phase = 'EXECUTIVE_PEEK';
-        this.appendLog(
-          `3. Faşist Politika Yetkisi: Başkan ${this.getCurrentPresident().name} destenin üstündeki 3 kartı inceliyor.`,
-          'executive'
-        );
-        this.events.emit('EXECUTIVE_POWER_TRIGGERED', {
-          power: 'POLICY_PEEK',
-          presidentId: s.presidentId,
-        });
-        this.events.emit('POLICY_PEEKED', {
-          presidentId: s.presidentId,
-          cards: [...s.peekedCards],
-        });
-        this.emitPhaseChange(prevPhase, 'EXECUTIVE_PEEK');
-        this.emitStateChanged();
-        return;
-      }
+    const triggeredPower =
+      enacted === 'FASCIST'
+        ? this.getExecutivePowerForFascistCount(s.fascistPolicies)
+        : 'NONE';
 
-      if (power === 'EXECUTION') {
-        s.activeExecutivePower = 'EXECUTION';
-        s.phase = 'EXECUTIVE_EXECUTION';
-        this.appendLog(
-          `${s.fascistPolicies}. Faşist Politika Yetkisi: Başkan ${this.getCurrentPresident().name} bir oyuncuyu infaz etmeli!`,
-          'executive'
-        );
-        this.events.emit('EXECUTIVE_POWER_TRIGGERED', {
-          power: 'EXECUTION',
-          presidentId: s.presidentId,
-        });
-        this.emitPhaseChange(prevPhase, 'EXECUTIVE_EXECUTION');
-        this.emitStateChanged();
-        return;
-      }
+    if (this.enableClaimDebate) {
+      // Beyan ve Tartışma fazı! Yetki varsa beyanlardan sonra tetiklenecek.
+      this.pendingPostClaimPower = triggeredPower;
+      // Geçici olarak receivedCopy'yi Claim hesaplamasına kadar sakla (presidentHand temiz)
+      s.presidentHand = receivedCopy;
+      s.currentClaim = {
+        round: s.round,
+        presidentId: s.presidentId,
+        chancellorId: s.chancellorId!,
+        enactedPolicy: enacted,
+        wasVetoed: false,
+        presidentDrawn: null,
+        presidentPassed: null,
+        chancellorReceived: null,
+        presidentClaimed: false,
+        chancellorClaimed: false,
+        hasConflict: false,
+        conflictSummary: '',
+      };
+      s.phase = 'CLAIM_DEBATE';
+      this.appendLog(
+        `Politika masaya kondu! Tartışma açıldı: Başkan ve Şansölye beyanlarını sunabilir.`,
+        'claim'
+      );
+      this.emitPhaseChange(prevPhase, 'CLAIM_DEBATE');
+      this.emitStateChanged();
+      return;
+    }
+
+    this.enterExecutivePowerOrNextRound(prevPhase, triggeredPower);
+  }
+
+  /** Veto Yetkisi: 5. Faşist politika sonrasında Şansölye veto teklif eder */
+  proposeVeto(chancellorId: string): void {
+    this.assertPhase('LEGISLATIVE_CHANCELLOR');
+    const s = this.state;
+    if (!s.vetoUnlocked) {
+      throw new Error('Veto yetkisi henüz açılmadı (5. Faşist politika gerekir).');
+    }
+    if (s.vetoRejectedThisTurn) {
+      throw new Error('Başkan bu tur Vetoyu zaten reddetti; kart seçmek zorundasın.');
+    }
+    if (s.chancellorId !== chancellorId) {
+      throw new Error('Yalnızca aktif Şansölye Veto teklif edebilir.');
+    }
+
+    const prevPhase = s.phase;
+    s.phase = 'LEGISLATIVE_VETO_RESPONSE';
+    const chanc = s.players.find((p) => p.id === chancellorId)!;
+    this.appendLog(
+      `⚖️ Şansölye ${chanc.name} elindeki kartları VETO etmek istedi! Başkan kararı bekleniyor.`,
+      'legislative'
+    );
+    this.events.emit('VETO_PROPOSED', {
+      chancellorId,
+      presidentId: s.presidentId,
+    });
+    this.emitPhaseChange(prevPhase, 'LEGISLATIVE_VETO_RESPONSE');
+    this.emitStateChanged();
+  }
+
+  /** Veto yanıtı: Kabul edilirse 2 kart da çöpe atılır ve seçim sayacı +1 ilerler */
+  respondToVeto(presidentId: string, accept: boolean): void {
+    this.assertPhase('LEGISLATIVE_VETO_RESPONSE');
+    const s = this.state;
+    if (s.presidentId !== presidentId) {
+      throw new Error('Yalnızca aktif Başkan Vetoyu yanıtlayabilir.');
+    }
+
+    const prevPhase = s.phase;
+    if (!accept) {
+      s.vetoRejectedThisTurn = true;
+      s.phase = 'LEGISLATIVE_CHANCELLOR';
+      this.appendLog(
+        `Başkan ${this.getCurrentPresident().name} Vetoyu REDDETTİ! Şansölye 2 karttan 1'ini geçirmek zorunda.`,
+        'legislative'
+      );
+      this.events.emit('VETO_RESOLVED', {
+        accepted: false,
+        electionTracker: s.electionTracker,
+      });
+      this.emitPhaseChange(prevPhase, 'LEGISLATIVE_CHANCELLOR');
+      this.emitStateChanged();
+      return;
+    }
+
+    // Veto KABUL EDİLDİ! İki kart da çöpe atılır, sayaç 1 ilerler
+    s.discardPile.push(...s.chancellorHand);
+    s.chancellorHand = [];
+    s.electionTracker++;
+    this.appendLog(
+      `⚖️ Başkan Vetoyu KABUL ETTİ! Her iki kart da çöpe atıldı. Seçim Sayacı: ${s.electionTracker}/3.`,
+      'legislative'
+    );
+    this.events.emit('VETO_RESOLVED', {
+      accepted: true,
+      electionTracker: s.electionTracker,
+    });
+
+    if (s.electionTracker >= 3) {
+      this.triggerChaosPolicy();
+      return;
     }
 
     this.advanceToNextRound(prevPhase);
   }
 
-  /** 3. Faşist politika sonrasında Başkanın kart incelemesini tamamlaması */
+  // =========================================================================
+  // 3. KART SONRASI BEYAN & ÇELİŞKİ TARTIŞMASI (CLAIM_DEBATE)
+  // =========================================================================
+
+  submitPresidentClaim(presidentId: string, drawn: Policy[], passed: Policy[]): void {
+    this.assertPhase('CLAIM_DEBATE');
+    const s = this.state;
+    if (!s.currentClaim || s.currentClaim.presidentId !== presidentId) {
+      throw new Error('Yalnızca bu turun Başkanı beyanda bulunabilir.');
+    }
+
+    s.currentClaim.presidentDrawn = [...drawn];
+    s.currentClaim.presidentPassed = [...passed];
+    s.currentClaim.presidentClaimed = true;
+
+    this.appendLog(
+      `${this.getCurrentPresident().name} (Başkan): "Desteden ${this.formatHand(drawn)} çektim, Şansölyeye ${this.formatHand(passed)} verdim."`,
+      'claim'
+    );
+
+    this.evaluateClaimConflict();
+    this.emitStateChanged();
+  }
+
+  submitChancellorClaim(chancellorId: string, received: Policy[]): void {
+    this.assertPhase('CLAIM_DEBATE');
+    const s = this.state;
+    if (!s.currentClaim || s.currentClaim.chancellorId !== chancellorId) {
+      throw new Error('Yalnızca bu turun Şansölyesi beyanda bulunabilir.');
+    }
+
+    s.currentClaim.chancellorReceived = [...received];
+    s.currentClaim.chancellorClaimed = true;
+
+    const chanc = s.players.find((p) => p.id === chancellorId)!;
+    this.appendLog(
+      `${chanc.name} (Şansölye): "Bana ${this.formatHand(received)} geldi."`,
+      'claim'
+    );
+
+    this.evaluateClaimConflict();
+    this.emitStateChanged();
+  }
+
+  private evaluateClaimConflict(): void {
+    const s = this.state;
+    const c = s.currentClaim;
+    if (!c || !c.presidentClaimed || !c.chancellorClaimed) {
+      if (c?.presidentClaimed) {
+        this.events.emit('CLAIM_SUBMITTED', {
+          actorId: c.presidentId,
+          role: 'PRESIDENT',
+          hasConflict: false,
+        });
+      }
+      return;
+    }
+
+    const pLib = (c.presidentPassed ?? []).filter((x) => x === 'LIBERAL').length;
+    const cLib = (c.chancellorReceived ?? []).filter((x) => x === 'LIBERAL').length;
+
+    if (pLib !== cLib) {
+      c.hasConflict = true;
+      c.conflictSummary = `ÇELİŞKİ! Başkan ${pLib} Liberal verdiğini, Şansölye ise ${cLib} Liberal aldığını iddia ediyor!`;
+      this.appendLog(`⚡ ${c.conflictSummary}`, 'claim');
+    } else {
+      c.hasConflict = false;
+      c.conflictSummary = 'Başkan ve Şansölye beyanları birbiriyle örtüşüyor.';
+      this.appendLog(`✓ ${c.conflictSummary}`, 'claim');
+    }
+
+    s.claimHistory.push(structuredClone(c));
+    this.bots.observeClaimOutcome(c);
+    this.events.emit('CLAIM_SUBMITTED', {
+      actorId: c.chancellorId,
+      role: 'CHANCELLOR',
+      hasConflict: c.hasConflict,
+    });
+  }
+
+  finishClaimDebate(): void {
+    this.assertPhase('CLAIM_DEBATE');
+    const prevPhase = this.state.phase;
+    this.state.presidentHand = [];
+    const power = this.pendingPostClaimPower;
+    this.pendingPostClaimPower = 'NONE';
+    this.enterExecutivePowerOrNextRound(prevPhase, power);
+  }
+
+  // =========================================================================
+  // 4. YÜRÜTME AŞAMASI (INVESTIGATE, SPECIAL_ELECTION, PEEK, EXECUTION)
+  // =========================================================================
+
+  private enterExecutivePowerOrNextRound(
+    prevPhase: GamePhase,
+    power: ExecutivePower
+  ): void {
+    const s = this.state;
+    if (power === 'INVESTIGATE') {
+      const candidates = this.getInvestigablePlayers(s.presidentId);
+      if (candidates.length > 0) {
+        s.activeExecutivePower = 'INVESTIGATE';
+        s.phase = 'EXECUTIVE_INVESTIGATE';
+        this.appendLog(
+          `🔍 Bağlılık Soruşturması: Başkan ${this.getCurrentPresident().name} bir oyuncunun Parti Üyeliği kartına bakıyor.`,
+          'executive'
+        );
+        this.events.emit('EXECUTIVE_POWER_TRIGGERED', {
+          power: 'INVESTIGATE',
+          presidentId: s.presidentId,
+        });
+        this.emitPhaseChange(prevPhase, 'EXECUTIVE_INVESTIGATE');
+        this.emitStateChanged();
+        return;
+      }
+    }
+
+    if (power === 'SPECIAL_ELECTION') {
+      s.activeExecutivePower = 'SPECIAL_ELECTION';
+      s.phase = 'EXECUTIVE_SPECIAL_ELECTION';
+      this.appendLog(
+        `🗳️ Özel Seçim Yetkisi: Başkan ${this.getCurrentPresident().name} sıradaki Başkan adayını bizzat seçiyor!`,
+        'executive'
+      );
+      this.events.emit('EXECUTIVE_POWER_TRIGGERED', {
+        power: 'SPECIAL_ELECTION',
+        presidentId: s.presidentId,
+      });
+      this.emitPhaseChange(prevPhase, 'EXECUTIVE_SPECIAL_ELECTION');
+      this.emitStateChanged();
+      return;
+    }
+
+    if (power === 'POLICY_PEEK') {
+      this.ensureDeckHasCards(3);
+      s.peekedCards = s.drawPile.slice(0, 3);
+      s.activeExecutivePower = 'POLICY_PEEK';
+      s.phase = 'EXECUTIVE_PEEK';
+      this.appendLog(
+        `👁️ Kart İnceleme (Policy Peek): Başkan ${this.getCurrentPresident().name} destenin üstündeki 3 kartı inceliyor.`,
+        'executive'
+      );
+      this.events.emit('EXECUTIVE_POWER_TRIGGERED', {
+        power: 'POLICY_PEEK',
+        presidentId: s.presidentId,
+      });
+      this.events.emit('POLICY_PEEKED', {
+        presidentId: s.presidentId,
+        cards: [...s.peekedCards],
+      });
+      this.emitPhaseChange(prevPhase, 'EXECUTIVE_PEEK');
+      this.emitStateChanged();
+      return;
+    }
+
+    if (power === 'EXECUTION') {
+      s.activeExecutivePower = 'EXECUTION';
+      s.phase = 'EXECUTIVE_EXECUTION';
+      this.appendLog(
+        `💀 İdam Yetkisi: Başkan ${this.getCurrentPresident().name} masadan bir oyuncuyu idam etmek zorunda!`,
+        'executive'
+      );
+      this.events.emit('EXECUTIVE_POWER_TRIGGERED', {
+        power: 'EXECUTION',
+        presidentId: s.presidentId,
+      });
+      this.emitPhaseChange(prevPhase, 'EXECUTIVE_EXECUTION');
+      this.emitStateChanged();
+      return;
+    }
+
+    this.advanceToNextRound(prevPhase);
+  }
+
+  /** Bağlılık Soruşturması: Hedefin Parti Üyeliğini ('LIBERAL' | 'FASCIST') görür (Hitler de 'FASCIST' görünür) */
+  investigateLoyalty(presidentId: string, targetId: string): PartyMembership {
+    this.assertPhase('EXECUTIVE_INVESTIGATE');
+    const s = this.state;
+    if (s.presidentId !== presidentId) {
+      throw new Error('Yalnızca aktif Başkan soruşturma yapabilir.');
+    }
+    const target = this.getInvestigablePlayers(presidentId).find((p) => p.id === targetId);
+    if (!target) {
+      throw new Error(`Geçersiz veya daha önce soruşturulmuş oyuncu: ${targetId}`);
+    }
+
+    const prevPhase = s.phase;
+    s.investigatedPlayerIds.push(target.id);
+    s.lastInvestigation = {
+      round: s.round,
+      investigatorId: presidentId,
+      targetId: target.id,
+      partyMembership: target.partyMembership,
+    };
+    s.activeExecutivePower = 'NONE';
+    this.bots.observeInvestigation(presidentId, target.id, target.partyMembership);
+
+    this.appendLog(
+      `🔍 Başkan ${this.getCurrentPresident().name}, ${target.name} oyuncusunun Parti Üyeliği kartını gizlice inceledi.`,
+      'executive'
+    );
+    this.events.emit('LOYALTY_INVESTIGATED', {
+      presidentId,
+      targetId: target.id,
+      party: target.partyMembership,
+    });
+
+    this.advanceToNextRound(prevPhase);
+    return target.partyMembership;
+  }
+
+  /** Özel Seçim: Başkan sonraki turun Başkanını seçer; sonraki tur eski saat yönü sıradan devam eder */
+  callSpecialElection(presidentId: string, chosenPresidentId: string): void {
+    this.assertPhase('EXECUTIVE_SPECIAL_ELECTION');
+    const s = this.state;
+    if (s.presidentId !== presidentId) {
+      throw new Error('Yalnızca aktif Başkan Özel Seçim yapabilir.');
+    }
+    const chosen = s.players.find(
+      (p) => p.id === chosenPresidentId && p.isAlive && p.id !== presidentId
+    );
+    if (!chosen) {
+      throw new Error(`Özel seçim için geçersiz aday: ${chosenPresidentId}`);
+    }
+
+    const prevPhase = s.phase;
+    // Normal sıradaki bir sonraki Başkan indeksini kaydet (zaten özel seçim turunda değilsek!)
+    if (s.specialElectionReturnIndex === null) {
+      s.specialElectionReturnIndex = (s.presidentIndex + 1) % s.players.length;
+    }
+
+    s.presidentIndex = chosen.seatIndex;
+    s.presidentId = chosen.id;
+    s.isSpecialElectionRound = true;
+    s.chancellorId = null;
+    s.chancellorNomineeId = null;
+    s.activeExecutivePower = 'NONE';
+    s.round++;
+    s.phase = 'ELECTION_NOMINATION';
+
+    this.appendLog(
+      `🗳️ ÖZEL SEÇİM! Yeni Başkan olarak ${chosen.name} atandı (Tur #${s.round}).`,
+      'executive'
+    );
+    this.events.emit('SPECIAL_ELECTION_CALLED', {
+      byPresidentId: presidentId,
+      chosenPresidentId: chosen.id,
+    });
+    this.emitPhaseChange(prevPhase, 'ELECTION_NOMINATION');
+    this.emitStateChanged();
+  }
+
   completePolicyPeek(presidentId: string): void {
     this.assertPhase('EXECUTIVE_PEEK');
     if (this.state.presidentId !== presidentId) {
@@ -592,23 +1011,22 @@ export class GameEngine {
     this.state.peekedCards = [];
     this.state.activeExecutivePower = 'NONE';
     this.appendLog(
-      `Başkan ${this.getCurrentPresident().name} desteye göz atma yetkisini tamamladı.`,
+      `Başkan ${this.getCurrentPresident().name} destedeki 3 kartı inceledi ve sırayla geri koydu.`,
       'executive'
     );
     this.advanceToNextRound(prevPhase);
   }
 
-  /** 4. veya 5. Faşist politika sonrasında Başkanın bir oyuncuyu infaz etmesi */
   executePlayer(presidentId: string, targetId: string): void {
     this.assertPhase('EXECUTIVE_EXECUTION');
     const s = this.state;
     if (s.presidentId !== presidentId) {
-      throw new Error(`Yalnızca aktif Başkan (${s.presidentId}) infaz kararı verebilir.`);
+      throw new Error(`Yalnızca aktif Başkan (${s.presidentId}) idam kararı verebilir.`);
     }
 
     const target = s.players.find((p) => p.id === targetId);
     if (!target || !target.isAlive || target.id === presidentId) {
-      throw new Error(`Geçersiz infaz hedefi: ${targetId}`);
+      throw new Error(`Geçersiz idam hedefi: ${targetId}`);
     }
 
     const prevPhase = s.phase;
@@ -617,7 +1035,7 @@ export class GameEngine {
     const wasHitler = target.role === 'HITLER';
 
     this.appendLog(
-      `İNFAZ! Başkan ${this.getCurrentPresident().name}, ${target.name} oyuncusunu infaz etti!`,
+      `💀 İDAM! Başkan ${this.getCurrentPresident().name}, ${target.name} oyuncusunu masadan kaldırdı! (Rolü açıklanmaz.)`,
       'executive'
     );
     this.events.emit('PLAYER_EXECUTED', {
@@ -630,7 +1048,7 @@ export class GameEngine {
       this.finishGame(
         'LIBERAL',
         'HITLER_EXECUTED',
-        `Hitler (${target.name}) infaz edildi! Liberaller oyunu kazandı!`
+        `İdam edilen kişi Hitler (${target.name}) çıktı! Liberaller anında kazandı!`
       );
       return;
     }
@@ -645,10 +1063,13 @@ export class GameEngine {
       s.liberalPolicies++;
     } else {
       s.fascistPolicies++;
+      if (s.fascistPolicies >= 5) {
+        s.vetoUnlocked = true;
+      }
     }
 
     this.appendLog(
-      `${policy} politika yürürlüğe girdi! Skor — Liberal: ${s.liberalPolicies}/5, Faşist: ${s.fascistPolicies}/6`,
+      `${policy === 'LIBERAL' ? '🔵 LİBERAL' : '🔴 FAŞİST'} politika yerleşti! Skor — Liberal: ${s.liberalPolicies}/5, Faşist: ${s.fascistPolicies}/6`,
       'legislative'
     );
     this.events.emit('POLICY_ENACTED', {
@@ -662,7 +1083,7 @@ export class GameEngine {
       this.finishGame(
         'LIBERAL',
         'LIBERAL_POLICIES',
-        '5 Liberal politika yürürlüğe girdi! Liberaller kazandı!'
+        'Liberal panosuna 5. Liberal Politika yerleştirildi! Liberaller kazandı!'
       );
       return;
     }
@@ -671,23 +1092,21 @@ export class GameEngine {
       this.finishGame(
         'FASCIST',
         'FASCIST_POLICIES',
-        '6 Faşist politika yürürlüğe girdi! Faşistler kazandı!'
+        'Faşist panosuna 6. Faşist Politika yerleştirildi! Faşistler kazandı!'
       );
     }
   }
 
-  /** 5 kişilik board için resmi Faşist yetki kilometre taşları */
   getExecutivePowerForFascistCount(count: number): ExecutivePower {
-    if (count === 3) return 'POLICY_PEEK';
-    if (count === 4 || count === 5) return 'EXECUTION';
-    return 'NONE';
+    if (count < 1 || count > 5) return 'NONE';
+    return this.state.boardPowers[count - 1] ?? 'NONE';
   }
 
   private advanceToNextRound(prevPhase: GamePhase): void {
     const s = this.state;
     s.chancellorId = null;
     s.chancellorNomineeId = null;
-    this.rotatePresidentClockwise();
+    this.advancePresidentTurn();
     s.round++;
     s.phase = 'ELECTION_NOMINATION';
 
@@ -699,14 +1118,25 @@ export class GameEngine {
     this.emitStateChanged();
   }
 
-  private rotatePresidentClockwise(): void {
+  /** Saat yönünde sıradaki hayatta olan Başkana geçer; Özel Seçim sonrası eski sıraya döner */
+  private advancePresidentTurn(): void {
     const s = this.state;
     const count = s.players.length;
-    for (let step = 1; step <= count; step++) {
-      const nextIdx = (s.presidentIndex + step) % count;
-      if (s.players[nextIdx].isAlive) {
-        s.presidentIndex = nextIdx;
-        s.presidentId = s.players[nextIdx].id;
+
+    let startScanIdx: number;
+    if (s.specialElectionReturnIndex !== null) {
+      startScanIdx = s.specialElectionReturnIndex;
+      s.specialElectionReturnIndex = null;
+    } else {
+      startScanIdx = (s.presidentIndex + 1) % count;
+    }
+    s.isSpecialElectionRound = false;
+
+    for (let offset = 0; offset < count; offset++) {
+      const idx = (startScanIdx + offset) % count;
+      if (s.players[idx].isAlive) {
+        s.presidentIndex = idx;
+        s.presidentId = s.players[idx].id;
         return;
       }
     }
@@ -717,13 +1147,13 @@ export class GameEngine {
     if (s.drawPile.length >= required) return;
 
     if (s.discardPile.length === 0) {
-      throw new Error('Destede ve ıskarta yığınında yeterli kart kalmadı.');
+      throw new Error('Destede ve çöpte yeterli kart kalmadı.');
     }
 
     s.drawPile = this.shuffle([...s.drawPile, ...s.discardPile]);
     s.discardPile = [];
     this.appendLog(
-      `Destede ${required}'ten az kart kaldığı için ıskarta kartları yeniden karıştırıldı (Deste: ${s.drawPile.length}).`,
+      `Destede ${required}'ten az kart kaldığı için çöp destesi karıştırılıp yeni deste oluşturuldu (Deste: ${s.drawPile.length}).`,
       'info'
     );
   }
@@ -740,14 +1170,9 @@ export class GameEngine {
   }
 
   // =========================================================================
-  // OFFLİNE BOT ADIMLAYICISI (CONSUME EDİLEBİLİR TURN HELPER)
+  // OFFLİNE BOT ADIMLAYICISI
   // =========================================================================
 
-  /**
-   * Mevcut fazda karar bekleyen tüm yapay zeka bot hamlelerini yürütür.
-   * Konsol/terminal simülasyonunda ve offline oyunda insan sırası dışındaki adımları ilerletir.
-   * @returns Hamle yapılıp yapılmadığı (true = durum ilerledi, false = insan hamlesi bekleniyor veya GAME_OVER)
-   */
   stepBots(): boolean {
     const s = this.state;
     switch (s.phase) {
@@ -781,7 +1206,8 @@ export class GameEngine {
         if (president.isHuman) return false;
         const discardIdx = this.bots.choosePresidentDiscardIndex(
           president,
-          s.presidentHand
+          s.presidentHand,
+          s
         );
         this.discardPolicyByPresident(president.id, discardIdx);
         return true;
@@ -790,11 +1216,97 @@ export class GameEngine {
       case 'LEGISLATIVE_CHANCELLOR': {
         const chancellor = s.players.find((p) => p.id === s.chancellorId);
         if (!chancellor || chancellor.isHuman) return false;
+        if (this.bots.shouldChancellorProposeVeto(chancellor, s.chancellorHand, s)) {
+          this.proposeVeto(chancellor.id);
+          return true;
+        }
         const enactIdx = this.bots.chooseChancellorEnactIndex(
           chancellor,
-          s.chancellorHand
+          s.chancellorHand,
+          s
         );
         this.enactPolicyByChancellor(chancellor.id, enactIdx);
+        return true;
+      }
+
+      case 'LEGISLATIVE_VETO_RESPONSE': {
+        const president = this.getCurrentPresident();
+        if (president.isHuman) return false;
+        const accept = this.bots.shouldPresidentAcceptVeto(president, s.chancellorHand, s);
+        this.respondToVeto(president.id, accept);
+        return true;
+      }
+
+      case 'CLAIM_DEBATE': {
+        const claim = s.currentClaim;
+        if (!claim) return false;
+        const pres = s.players.find((p) => p.id === claim.presidentId)!;
+        const chanc = s.players.find((p) => p.id === claim.chancellorId)!;
+        let acted = false;
+
+        if (!claim.presidentClaimed && !pres.isHuman) {
+          const { drawn, passed } = this.bots.choosePresidentClaim(
+            pres,
+            s.actualPresidentDrawn,
+            s.presidentHand, // receivedCopy saklandı
+            claim.enactedPolicy
+          );
+          this.submitPresidentClaim(pres.id, drawn, passed);
+          acted = true;
+        }
+        if (
+          this.state.currentClaim &&
+          !this.state.currentClaim.chancellorClaimed &&
+          !chanc.isHuman
+        ) {
+          const rec = this.bots.chooseChancellorClaim(
+            chanc,
+            this.state.presidentHand,
+            this.state.currentClaim.enactedPolicy
+          );
+          this.submitChancellorClaim(chanc.id, rec);
+          acted = true;
+        }
+        if (
+          this.state.phase === 'CLAIM_DEBATE' &&
+          this.state.currentClaim?.presidentClaimed &&
+          this.state.currentClaim?.chancellorClaimed &&
+          acted
+        ) {
+          return true;
+        }
+        if (
+          this.state.phase === 'CLAIM_DEBATE' &&
+          this.state.currentClaim?.presidentClaimed &&
+          this.state.currentClaim?.chancellorClaimed &&
+          !pres.isHuman &&
+          !chanc.isHuman
+        ) {
+          this.finishClaimDebate();
+          return true;
+        }
+        return acted;
+      }
+
+      case 'EXECUTIVE_INVESTIGATE': {
+        const president = this.getCurrentPresident();
+        if (president.isHuman) return false;
+        const targetId = this.bots.chooseInvestigateTarget(
+          president,
+          this.getInvestigablePlayers(president.id)
+        );
+        this.investigateLoyalty(president.id, targetId);
+        return true;
+      }
+
+      case 'EXECUTIVE_SPECIAL_ELECTION': {
+        const president = this.getCurrentPresident();
+        if (president.isHuman) return false;
+        const chosenId = this.bots.chooseSpecialElectionTarget(
+          president,
+          this.getAlivePlayers()
+        );
+        this.callSpecialElection(president.id, chosenId);
         return true;
       }
 
@@ -816,6 +1328,12 @@ export class GameEngine {
       default:
         return false;
     }
+  }
+
+  private formatHand(cards: Policy[]): string {
+    const lib = cards.filter((c) => c === 'LIBERAL').length;
+    const fasc = cards.length - lib;
+    return `${lib} Liberal, ${fasc} Faşist`;
   }
 
   private assertPhase(expected: GamePhase): void {
